@@ -81,8 +81,6 @@ find_package(MPI REQUIRED)
 # Find Kokkos
 find_package(Kokkos REQUIRED)
 
-
-
 add_definitions(-DHAVE_KOKKOS=1)
 
 # Set multiple potential include paths to find MATAR
@@ -91,6 +89,13 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../MATAR"
   "${CMAKE_SOURCE_DIR}/../MATAR"
   "${CMAKE_BINARY_DIR}/../MATAR"
+)
+
+include_directories(
+  "${SCRIPT_DIR}/../include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+  "${CMAKE_SOURCE_DIR}/../include"
+  "${CMAKE_BINARY_DIR}/../include"
 )
 
 message(STATUS "CMAKE_SOURCE_DIR absolute path: ${CMAKE_SOURCE_DIR}")

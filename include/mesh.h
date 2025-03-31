@@ -35,8 +35,8 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MESH_H
 
 #include "matar.h"
-#include "state.h"
-#include "ref_elem.h"
+// #include "state.h"
+// #include "ref_elem.h"
 #include <cmath>
 
 #define PI 3.141592653589793
