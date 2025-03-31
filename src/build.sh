@@ -78,6 +78,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find MPI
 find_package(MPI REQUIRED)
 
+# Set MPI compiler wrappers
+set(CMAKE_CXX_COMPILER mpicxx)
+set(CMAKE_C_COMPILER mpicc)
+
+# Check if MPI was found
+if(MPI_FOUND)
+    message(STATUS "MPI found")
+    include_directories(\${MPI_INCLUDE_PATH})
+    include_directories(\${MPI_CXX_INCLUDE_PATH})
+endif()
+
 # Find Kokkos
 find_package(Kokkos REQUIRED)
 
@@ -85,17 +96,11 @@ add_definitions(-DHAVE_KOKKOS=1)
 
 # Set multiple potential include paths to find MATAR
 include_directories(
-  "${SCRIPT_DIR}/../MATAR"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../MATAR"
-  "${CMAKE_SOURCE_DIR}/../MATAR"
-  "${CMAKE_BINARY_DIR}/../MATAR"
-)
-
-include_directories(
-  "${SCRIPT_DIR}/../include"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include"
-  "${CMAKE_SOURCE_DIR}/../include"
-  "${CMAKE_BINARY_DIR}/../include"
+    "${SCRIPT_DIR}/../MATAR"
+    "${SCRIPT_DIR}/../include"
+    "${SCRIPT_DIR}/../parmetis/install_parmetis/include"
+    "${SCRIPT_DIR}/../parmetis/install_metis/include"
+    "${SCRIPT_DIR}/../parmetis/install_gklib/include"
 )
 
 message(STATUS "CMAKE_SOURCE_DIR absolute path: ${CMAKE_SOURCE_DIR}")
@@ -109,30 +114,36 @@ message(STATUS "Primary MATAR include path: ${SCRIPT_DIR}/../MATAR")
 
 # Create the executable
 add_executable(parmetis_test parmetis_test.cpp)
-target_link_libraries(parmetis_test Kokkos::kokkos)
 
-# Check if MPI was found
-if(MPI_FOUND)
-  message(STATUS "MPI found")
-  # Include directories for MPI
-  include_directories(\${MPI_INCLUDE_PATH})
-  include_directories(\${MPI_CXX_INCLUDE_PATH})
+# Link libraries - note the order matters
+target_link_libraries(parmetis_test 
+    PRIVATE
+    MPI::MPI_CXX
+    Kokkos::kokkos
+    -L${SCRIPT_DIR}/../parmetis/install_parmetis/lib -lparmetis
+    -L${SCRIPT_DIR}/../parmetis/install_metis/lib -lmetis
+    -L${SCRIPT_DIR}/../parmetis/install_gklib/lib -lGKlib
+)
 
-  # Link your target with MPI libraries
-  target_link_libraries(parmetis_test ${MPI_CXX_LIBRARIES})
-endif()
-
+# Set rpath for runtime library loading
+set_target_properties(parmetis_test PROPERTIES
+    INSTALL_RPATH "${SCRIPT_DIR}/../parmetis/install_parmetis/lib:${SCRIPT_DIR}/../parmetis/install_metis/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+)
 EOF
 
 # Build the example
 echo "Building parmetis_test example..."
 cd "${BUILD_DIR}"
 
-# Configure with CMake
-cmake -DCMAKE_PREFIX_PATH="${SCRIPT_DIR}/install" -DCMAKE_INCLUDE_PATH="${SCRIPT_DIR}/../MATAR" ..
+# Configure with CMake - simplified and using MPI compiler wrappers
+cmake -DCMAKE_PREFIX_PATH="${SCRIPT_DIR}/install" \
+      -DCMAKE_INCLUDE_PATH="${SCRIPT_DIR}/../MATAR" \
+      -DCMAKE_CXX_COMPILER=mpicxx \
+      -DCMAKE_C_COMPILER=mpicc ..
 
 # Build
-make -j$(nproc)
+make VERBOSE=1 -j$(nproc)
 
 echo "Build completed!"
 echo "The executable can be found at: ${BUILD_DIR}/parmetis_test"

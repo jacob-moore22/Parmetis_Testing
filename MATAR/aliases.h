@@ -41,7 +41,7 @@
 #include "kokkos_types.h"
 
 
-using real_t = double;
+// using real_t = double;
 using u_int  = unsigned int;
 
 

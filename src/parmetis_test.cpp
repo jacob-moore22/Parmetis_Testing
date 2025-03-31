@@ -2,13 +2,23 @@
 #include <stdlib.h>
 #include <iostream>
 #include <mpi.h>
-// #include <parmetis.h>
+#include <parmetis.h>
 #include <Kokkos_Core.hpp>
 #include "matar.h"
 #include "distributed_array.h"
 #include "mesh.h"
 
 
+// Possible node states, used to initialize node_t
+enum class node_state
+{
+    coords,
+    velocity,
+    mass,
+    temp,
+    q_flux,
+    force,
+};
 
 /////////////////////////////////////////////////////////////////////////////
 ///
@@ -36,6 +46,11 @@ struct node_t
     }; // end method
 }; // end node_t
 
+inline int get_id(int i, int j, int k, int num_i, int num_j)
+{
+    return i + j * num_i + k * num_i * num_j;
+}
+
 
 /////////////////////////////////////////////////////////////////////////////
 ///
@@ -54,7 +69,7 @@ void build_3d_box(Mesh_t& mesh,
         node_t&   node,
         std::vector<double> origin,
         std::vector<double> length,
-        std::vector<int> num_elems) const
+        std::vector<int> num_elems)
     {
         printf(" Creating a 3D box mesh \n");
 
@@ -80,7 +95,7 @@ void build_3d_box(Mesh_t& mesh,
         const double dy = ly / ((double)num_elems_j);  // len/(num_elems_j)
         const double dz = lz / ((double)num_elems_k);  // len/(num_elems_k)
 
-        const int num_elems = num_elems_i * num_elems_j * num_elems_k;
+        const int total_num_elems = num_elems_i * num_elems_j * num_elems_k;
 
         int rk_num_bins = 2;
 
@@ -118,7 +133,7 @@ void build_3d_box(Mesh_t& mesh,
         node.coords.update_device();
 
         // initialize elem variables
-        mesh.initialize_elems(num_elems, num_dim);
+        mesh.initialize_elems(total_num_elems, num_dim);
 
         // --- Build elems  ---
 
@@ -159,12 +174,48 @@ void build_3d_box(Mesh_t& mesh,
         mesh.nodes_in_elem.update_device();
 
         // initialize corner variables
-        int num_corners = num_elems * mesh.num_nodes_in_elem;
+        int num_corners = total_num_elems * mesh.num_nodes_in_elem;
         mesh.initialize_corners(num_corners);
 
         // Build connectivity
         mesh.build_connectivity();
     } // end build_3d_box
+
+
+// Function to build adjacency structure required by ParMETIS
+void build_adjacency_structure(Mesh_t& mesh, std::vector<idx_t>& adjacencyPointers, std::vector<idx_t>& adjacencyList) {
+    // Initialize adjacencyPointers with the correct size (num_nodes + 1)
+    adjacencyPointers.resize(mesh.num_nodes + 1);
+    adjacencyPointers[0] = 0;
+
+    // First pass: Set up adjacencyPointers using num_nodes_in_node
+    size_t totalAdjacencies = 0;
+    for (size_t i = 0; i < mesh.num_nodes; ++i) {
+        size_t numAdjacent = mesh.num_nodes_in_node(i);
+        adjacencyPointers[i + 1] = adjacencyPointers[i] + numAdjacent;
+        totalAdjacencies += numAdjacent;
+    }
+
+    // Resize adjacencyList to hold all adjacencies
+    adjacencyList.resize(totalAdjacencies);
+
+    // Second pass: Fill adjacencyList using nodes_in_node
+    size_t currentIndex = 0;
+    for (size_t i = 0; i < mesh.num_nodes; ++i) {
+        size_t numAdjacent = mesh.num_nodes_in_node(i);
+        
+        // Copy adjacent nodes
+        for (size_t j = 0; j < numAdjacent; ++j) {
+            adjacencyList[currentIndex++] = mesh.nodes_in_node(i, j);
+        }
+    }
+
+    // Debug output
+    std::cout << "Adjacency structure built using mesh connectivity:" << std::endl;
+    std::cout << "Number of nodes: " << mesh.num_nodes << std::endl;
+    std::cout << "Total adjacencies: " << totalAdjacencies << std::endl;
+    std::cout << "Average connectivity: " << (double)totalAdjacencies / mesh.num_nodes << std::endl;
+}
 
 
 
@@ -179,17 +230,20 @@ int main(int argc, char *argv[]) {
     int processRank, numProcesses;
     MPI_Comm_rank(MPI_COMM_WORLD, &processRank);
     MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
+
+
+    MPI_Comm comm;
+    MPI_Comm_dup(MPI_COMM_WORLD, &comm);
     
     // Initialize Kokkos
     Kokkos::initialize(argc, argv);
     {
 
-        // Create the mesh builder
-        MeshBuilder mesh_builder;
-
+        
 
         // Create a mesh from the mesh.h file
-        Mesh mesh;
+        Mesh_t mesh;
+        node_t node;
 
         // 
         std::vector<double> origin(3);
@@ -209,26 +263,52 @@ int main(int argc, char *argv[]) {
 
 
         build_3d_box(mesh, 
-                     State.node, 
+                     node, 
                      origin,
                      length,
                      num_elems);
 
+
+        std::cout << "Mesh built" << std::endl;
+        std::cout << "Mesh nodes: " << mesh.num_nodes << std::endl;
+        std::cout << "Mesh elems: " << mesh.num_elems << std::endl; 
+
         
         // Build adjacency structure for the mesh
-        std::vector<idx_t> adjacencyPointers(localVertexCount + 1);
+        // adjacencyPointers: Array of size num_nodes + 1 that stores the starting index in adjacencyList for each node's neighbors
+        std::vector<idx_t> adjacencyPointers(mesh.num_nodes + 1);
+        // adjacencyList: Array that stores the actual neighbor node IDs for each node
         std::vector<idx_t> adjacencyList;
         
         adjacencyPointers[0] = 0;
-        
 
+        int numPartitions = 2;
         
+        std::cout << "**** Mesh built ****" << std::endl;
+        std::cout << "Mesh nodes: " << mesh.num_nodes << std::endl;
+        std::cout << "Mesh elems: " << mesh.num_elems << std::endl; 
+        std::cout << "Num partitions: " << numPartitions << std::endl;
+
+
+        // Build adjacency structure required by ParMETIS
+        build_adjacency_structure(mesh, adjacencyPointers, adjacencyList);
+
         // ========= ParMETIS Partitioning =========
         // Now we call ParMETIS to partition our graph
         
-        // Initialize partition array
-        std::vector<idx_t> vertexPartition(localVertexCount);
-        
+        // Initialize vertex distribution array
+        std::vector<idx_t> vertexDistribution(numProcesses + 1);
+
+        // For initial distribution, assign all vertices to rank 0 since we're starting with a single mesh
+        vertexDistribution[0] = 0;
+        vertexDistribution[1] = mesh.num_nodes;
+        for (int i = 2; i <= numProcesses; i++) {
+            vertexDistribution[i] = mesh.num_nodes;
+        }
+
+        // Initialize partition array that will store the result
+        std::vector<idx_t> vertexPartition(mesh.num_nodes);
+
         // ParMETIS parameters
         idx_t useWeights = 0;  // No weights
         idx_t zeroBasedIndexing = 0;  // 0-based indexing
@@ -252,7 +332,7 @@ int main(int argc, char *argv[]) {
         parmetisOptions[0] = 0;
         
         // Call ParMETIS to partition the graph
-        int result = 0; /*ParMETIS_V3_PartKway(
+        int result = ParMETIS_V3_PartKway(
             vertexDistribution.data(), 
             adjacencyPointers.data(), 
             adjacencyList.data(),
@@ -260,8 +340,8 @@ int main(int argc, char *argv[]) {
             &numConstraints, &numPartitions,
             targetPartitionWeights, imbalanceTolerance, 
             parmetisOptions, &cutEdgeCount, 
-            vertexPartition.data(), &MPI_COMM_WORLD
-        );*/
+            vertexPartition.data(), &comm
+        );
         
         if (result == METIS_OK) {
             // Print partition info on rank 0
@@ -283,34 +363,34 @@ int main(int argc, char *argv[]) {
         delete[] targetPartitionWeights;
         delete[] imbalanceTolerance;
         
-        // ========= Creating distributed array with partitioned graph =========
-        // Now create our distributed array with the partitioned graph
-        DistributedDCArray<double> mesh;
+        // // ========= Creating distributed array with partitioned graph =========
+        // // Now create our distributed array with the partitioned graph
+        // DistributedDCArray<double> mesh;
         
-        // Initialize the array with the graph data
-        mesh.init(
-            vertexDistribution.data(), vertexDistribution.size(),
-            adjacencyPointers.data(), adjacencyPointers.size(),
-            adjacencyList.data(), adjacencyList.size()
-        );
+        // // Initialize the array with the graph data
+        // mesh.init(
+        //     vertexDistribution.data(), vertexDistribution.size(),
+        //     adjacencyPointers.data(), adjacencyPointers.size(),
+        //     adjacencyList.data(), adjacencyList.size()
+        // );
         
-        // Set values based on rank for demonstration
-        mesh.set_values(static_cast<double>(processRank));
+        // // Set values based on rank for demonstration
+        // mesh.set_values(static_cast<double>(processRank));
         
-        // Perform HALO communications
-        mesh.comm();
+        // // Perform HALO communications
+        // mesh.comm();
         
-        // Check some values after communication
-        if (processRank == 0) {
-            std::cout << "After communication on rank " << processRank << ":" << std::endl;
-            std::cout << "Owned elements: " << mesh.get_owned_count() << std::endl;
-            std::cout << "Total elements (owned + halo): " << mesh.get_total_count() << std::endl;
+        // // Check some values after communication
+        // if (processRank == 0) {
+        //     std::cout << "After communication on rank " << processRank << ":" << std::endl;
+        //     std::cout << "Owned elements: " << mesh.get_owned_count() << std::endl;
+        //     std::cout << "Total elements (owned + halo): " << mesh.get_total_count() << std::endl;
             
-            // Print some values from halo regions
-            if (mesh.get_total_count() > mesh.get_owned_count()) {
-                std::cout << "First halo element: " << mesh(mesh.get_owned_count()) << std::endl;
-            }
-        }
+        //     // Print some values from halo regions
+        //     if (mesh.get_total_count() > mesh.get_owned_count()) {
+        //         std::cout << "First halo element: " << mesh(mesh.get_owned_count()) << std::endl;
+        //     }
+        // }
         
         // Synchronize all processes
         MPI_Barrier(MPI_COMM_WORLD);
