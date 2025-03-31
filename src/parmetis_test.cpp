@@ -51,9 +51,7 @@ struct node_t
 ///
 /////////////////////////////////////////////////////////////////////////////
 void build_3d_box(Mesh_t& mesh,
-        GaussPoint_t& GaussPoints,
         node_t&   node,
-        corner_t& corner,
         std::vector<double> origin,
         std::vector<double> length,
         std::vector<int> num_elems) const
@@ -163,7 +161,6 @@ void build_3d_box(Mesh_t& mesh,
         // initialize corner variables
         int num_corners = num_elems * mesh.num_nodes_in_elem;
         mesh.initialize_corners(num_corners);
-        // corner.initialize(num_corners, num_dim);
 
         // Build connectivity
         mesh.build_connectivity();
@@ -212,9 +209,7 @@ int main(int argc, char *argv[]) {
 
 
         build_3d_box(mesh, 
-                     State.GaussPoints, 
                      State.node, 
-                     State.corner, 
                      origin,
                      length,
                      num_elems);
@@ -226,10 +221,7 @@ int main(int argc, char *argv[]) {
         
         adjacencyPointers[0] = 0;
         
-        for (int i = 0; i < localVertexCount; i++) {
-            
 
-        }
         
         // ========= ParMETIS Partitioning =========
         // Now we call ParMETIS to partition our graph
