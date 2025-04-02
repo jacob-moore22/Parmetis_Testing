@@ -290,26 +290,22 @@ int main(int argc, char *argv[]) {
         // Only build mesh on rank 0
         if (processRank == 0) {
 
-        std::vector<double> origin(3);
-        origin[0] = 0.0;
-        origin[1] = 0.0;
-        origin[2] = 0.0;
+            std::vector<double> origin(3);
+            origin[0] = 0.0;
+            origin[1] = 0.0;
+            origin[2] = 0.0;
 
-        std::vector<double> length(3);
-        length[0] = 1.0;
-        length[1] = 1.0;
-        length[2] = 1.0;
+            std::vector<double> length(3);
+            length[0] = 2.0;
+            length[1] = 1.0;
+            length[2] = 1.0;
 
             std::vector<int> num_elems_vec(3);
-            num_elems_vec[0] = 3;  
-            num_elems_vec[1] = 3;
-            num_elems_vec[2] = 3;
+            num_elems_vec[0] = 20;  
+            num_elems_vec[1] = 20;
+            num_elems_vec[2] = 20;
 
-        build_3d_box(mesh, 
-                     node, 
-                     origin,
-                     length,
-                        num_elems_vec);
+            build_3d_box(mesh, node, origin, length, num_elems_vec);
 
             num_nodes = mesh.num_nodes;
             num_elems = mesh.num_elems;
@@ -317,282 +313,122 @@ int main(int argc, char *argv[]) {
             std::cout << "**** Mesh built on rank 0 ****" << std::endl;
             std::cout << "Mesh nodes: " << num_nodes << std::endl;
             std::cout << "Mesh elems: " << num_elems << std::endl;
-        }
 
-        // Broadcast mesh size information to all ranks
-        MPI_Bcast(&num_nodes, 1, MPI_UNSIGNED_LONG, 0, comm);
-        MPI_Bcast(&num_elems, 1, MPI_UNSIGNED_LONG, 0, comm);
+            std::cout << "Number of processes: " << numProcesses << std::endl;
 
-        // Build adjacency structure for the mesh (only on rank 0)
-        // adjacencyPointers: Array of size num_nodes + 1 that stores the starting index in adjacencyList for each vertex
-        // adjacencyPointers[i] points to the start of vertex i's adjacency list in adjacencyList
-        // adjacencyPointers[num_nodes] contains the total size of adjacencyList
-        std::vector<idx_t> adjacencyPointers;
-        
-        // adjacencyList: Array that stores the actual adjacency information
-        // For each vertex i, adjacencyList[adjacencyPointers[i] to adjacencyPointers[i+1]-1] contains
-        // the indices of vertices that are adjacent to vertex i
-        std::vector<idx_t> adjacencyList;
-        
-        if (processRank == 0) {
-            adjacencyPointers.resize(num_nodes + 1);
-        adjacencyPointers[0] = 0;
-            build_adjacency_structure(mesh, adjacencyPointers, adjacencyList);
-        }
+            // Use METIS to partition the mesh
+            // int METIS PartMeshNodal( idx t *ne, idx t *nn, idx t *eptr, idx t *eind, idx t *vwgt, idx t *vsize,
+            // idx t *nparts, real t *tpwgts, idx t *options, idx t *objval, idx t *epart, idx t *npart)
+            idx_t ne = num_elems;
+            idx_t nn = num_nodes;
+            std::vector<idx_t> eptr(num_elems + 1);
+            std::vector<idx_t> eind(num_elems * mesh.num_nodes_in_elem);
+            std::vector<real_t> tpwgts(numProcesses, 1.0/numProcesses);
+            std::vector<idx_t> options(METIS_NOPTIONS);
+            std::vector<idx_t> epart(num_elems);
+            std::vector<idx_t> npart(num_nodes);
 
-        // Calculate desired number of vertices per process and initialize vertex distribution
-        idx_t avg_vertices = num_nodes / numProcesses;  // Integer division for base size
-        idx_t remainder = num_nodes % numProcesses;     // Extra vertices to distribute
-        
-        // Initialize vertex distribution array
-        std::vector<idx_t> vertexDistribution(numProcesses + 1, 0);
-        vertexDistribution[0] = 0;
-        
-        // Distribute vertices more evenly, handling remainder
-        for (int i = 1; i <= numProcesses; i++) {
-            vertexDistribution[i] = vertexDistribution[i-1] + avg_vertices;
-            if (i <= remainder) {  // Add one extra vertex to early processes if needed
-                vertexDistribution[i]++;
-            }
-        }
+            // Initialize options
+            METIS_SetDefaultOptions(options.data());
+            options[METIS_OPTION_NUMBERING] = 0;
+            options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;
+            options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
+            options[METIS_OPTION_CONTIG] = 1;
 
-        // Print the initial distribution (debug)
-        if (processRank == 0) {
-            std::cout << "\nInitial vertex distribution: ";
-            for (int i = 0; i < numProcesses + 1; i++) {
-                std::cout << vertexDistribution[i] << " ";
-            }
-            std::cout << std::endl;
-        }
-
-        // Broadcast adjacency information to all ranks
-        // Communication pattern for distributing adjacency information:
-        // 1. Root process (rank 0) broadcasts the size of the adjacency list
-        // 2. Root process broadcasts the adjacency pointers array (size = num_nodes + 1)
-        //    - This array contains the starting indices for each vertex's adjacency list
-        // 3. Root process broadcasts the adjacency list array (size = adjListSize)
-        //    - This array contains the actual adjacency information for all vertices
-        // 4. Non-root processes:
-        //    - First receive the size information
-        //    - Allocate their local arrays based on the received size
-        //    - Then receive the actual data
-        if (processRank == 0) {
-            idx_t adjListSize = adjacencyList.size();
-            MPI_Bcast(&adjListSize, 1, MPI_INT, 0, comm);
-            MPI_Bcast(adjacencyPointers.data(), num_nodes + 1, MPI_INT, 0, comm);
-            MPI_Bcast(adjacencyList.data(), adjListSize, MPI_INT, 0, comm);
-        } else {
-            idx_t adjListSize;
-            MPI_Bcast(&adjListSize, 1, MPI_INT, 0, comm);
-            adjacencyPointers.resize(num_nodes + 1);
-            adjacencyList.resize(adjListSize);
-            MPI_Bcast(adjacencyPointers.data(), num_nodes + 1, MPI_INT, 0, comm);
-            MPI_Bcast(adjacencyList.data(), adjListSize, MPI_INT, 0, comm);
-        }
-
-        // All ranks allocate vertexPartition
-        // Array to store the partitioning result from ParMETIS
-        // Each element vertexPartition[i] contains the process rank (0 to numProcesses-1) 
-        // that vertex i is assigned to after partitioning
-        // Size is num_nodes to store partition assignment for every vertex in the mesh
-        std::vector<idx_t> vertexPartition(num_nodes);
-
-        // Create vertex weights to force balanced partitioning
-        std::vector<idx_t> vertexWeights(num_nodes, 1);  // All vertices have equal weight
-        
-        // Set options to maximum imbalance tolerance (for testing)
-        std::vector<real_t> targetPartitionWeights(numProcesses, 1.0/numProcesses);
-        std::vector<real_t> imbalanceTolerance(1, 1.01);  // Very strict 1% imbalance tolerance
-        
-        // Set ParMETIS options
-        idx_t parmetisOptions[METIS_NOPTIONS];
-        METIS_SetDefaultOptions(parmetisOptions);
-        parmetisOptions[0] = 1;     // Use options
-        parmetisOptions[1] = 0;     // No debug info
-        parmetisOptions[2] = 1;     // Use Sort matching instead of Random
-        parmetisOptions[3] = 1;     // Force parallel partitioning
-        
-        // Set weight flag to indicate we're using vertex weights
-        idx_t useWeights = 1;  // Use vertex weights
-        
-        // Validate input before calling ParMETIS
-        validate_parmetis_input(vertexDistribution, adjacencyPointers, adjacencyList, processRank);
-        
-        // Use METIS_PartGraphKway directly for testing on rank 0 (simpler approach)
-        if (processRank == 0) {
-            std::cout << "Trying direct METIS partitioning first...\n";
-        
-        // Initialize partition array
-            std::vector<idx_t> metis_partition(num_nodes);
-            
-            // Call METIS directly (serial partitioner)
-            idx_t n = num_nodes;
-            idx_t ncon = 1;
-            idx_t edgecut;
-            
-            int metis_result = METIS_PartGraphKway(
-                &n,                      // Number of vertices
-                &ncon,                   // Number of balancing constraints
-                adjacencyPointers.data(),// Adjacency structure: xadj
-                adjacencyList.data(),    // Adjacency structure: adjncy
-                NULL,                    // Vertex weights
-                NULL,                    // Size of vertices for comm volume
-                NULL,                    // Edge weights
-                &numProcesses,          // Number of partitions
-                NULL,                    // Target partition weights
-                NULL,                    // Constraints
-                NULL,                    // Options
-                &edgecut,                // Output: Edge-cut or comm volume
-                metis_partition.data()   // Output: Partition vector
-            );
-            
-            // Count vertices assigned to each partition by METIS
-            std::vector<int> metis_partition_sizes(numProcesses, 0);
-            for (idx_t i = 0; i < num_nodes; i++) {
-                metis_partition_sizes[metis_partition[i]]++;
-            }
-            
-            std::cout << "METIS partitioning result: " << (metis_result == METIS_OK ? "Success" : "Failed") << std::endl;
-            std::cout << "METIS partition distribution:" << std::endl;
-            for (int i = 0; i < numProcesses; i++) {
-                std::cout << "Rank " << i << ": " << metis_partition_sizes[i] << " vertices" << std::endl;
-            }
-        }
-        
-        MPI_Barrier(comm);  // Make sure all ranks wait before continuing
-        
-        // Let's try using ParMETIS_V3_PartMeshKway which is designed for mesh partitioning
-        // First create arrays for node elements - this maps nodes to elements
-        std::vector<idx_t> elementsPerNode;
-        std::vector<idx_t> nodeElements;
-        
-        if (processRank == 0) {
-            // Create a mapping of nodes to elements
-            elementsPerNode.resize(num_nodes, 0);
-            
-            // First count how many elements each node belongs to
-            for (size_t e = 0; e < num_elems; e++) {
-                for (size_t n = 0; n < mesh.num_nodes_in_elem; n++) {
-                    idx_t node_id = mesh.nodes_in_elem.host(e, n);
-                    elementsPerNode[node_id]++;
-                }
-            }
-            
-            // Calculate total size needed for nodeElements
-            idx_t totalEntries = 0;
-            for (size_t i = 0; i < num_nodes; i++) {
-                totalEntries += elementsPerNode[i];
-            }
-            
-            // Create nodeElements array and fill it
-            nodeElements.resize(totalEntries);
-            
-            // Create temporary array to track current position for each node
-            std::vector<idx_t> currentPos(num_nodes, 0);
-            
-            // Reset elementsPerNode to use as a cumulative sum
-            idx_t sum = 0;
-            for (size_t i = 0; i < num_nodes; i++) {
-                idx_t count = elementsPerNode[i];
-                elementsPerNode[i] = sum;
-                sum += count;
-            }
-            elementsPerNode.push_back(sum);  // Add final entry
-            
-            // Fill in nodeElements
-            for (size_t e = 0; e < num_elems; e++) {
-                for (size_t n = 0; n < mesh.num_nodes_in_elem; n++) {
-                    idx_t node_id = mesh.nodes_in_elem.host(e, n);
-                    idx_t pos = elementsPerNode[node_id] + currentPos[node_id];
-                    nodeElements[pos] = e;
-                    currentPos[node_id]++;
-                }
-            }
-        }
-        
-        // Broadcast node-to-element mapping to all ranks
-        if (processRank == 0) {
-            idx_t nePtrSize = elementsPerNode.size();
-            idx_t neSize = nodeElements.size();
-            MPI_Bcast(&nePtrSize, 1, MPI_INT, 0, comm);
-            MPI_Bcast(&neSize, 1, MPI_INT, 0, comm);
-            MPI_Bcast(elementsPerNode.data(), nePtrSize, MPI_INT, 0, comm);
-            MPI_Bcast(nodeElements.data(), neSize, MPI_INT, 0, comm);
-        } else {
-            idx_t nePtrSize, neSize;
-            MPI_Bcast(&nePtrSize, 1, MPI_INT, 0, comm);
-            MPI_Bcast(&neSize, 1, MPI_INT, 0, comm);
-            elementsPerNode.resize(nePtrSize);
-            nodeElements.resize(neSize);
-            MPI_Bcast(elementsPerNode.data(), nePtrSize, MPI_INT, 0, comm);
-            MPI_Bcast(nodeElements.data(), neSize, MPI_INT, 0, comm);
-        }
-        
-        // Now try ParMETIS_V3_PartMeshKway
-        idx_t ncon = 1;
-        std::vector<idx_t> elementPartition(num_elems);
-        
-        int result2 = ParMETIS_V3_PartMeshKway(
-            elementsPerNode.data(),    // elmdist
-            nodeElements.data(),       // eptr
-            NULL,                      // eind (not used since we provide element to node mapping)
-            NULL,                      // elmwgt
-            &useWeights,               // wgtflag
-            &zeroBasedIndexing,        // numflag
-            &ncon,                     // ncon
-            &numProcesses,            // nparts
-            targetPartitionWeights.data(), // tpwgts
-            imbalanceTolerance.data(), // ubvec
-            parmetisOptions,           // options
-            &cutEdgeCount,             // edgecut
-            elementPartition.data(),   // part (output)
-            &comm                      // comm
-        );
-        
-        // Derive node partitioning from element partitioning
-        if (processRank == 0) {
-            // Count elements assigned to each part
-            std::vector<int> elem_partition_sizes(numProcesses, 0);
+            // Initialize eptr
+            eptr[0] = 0;
             for (idx_t i = 0; i < num_elems; i++) {
-                elem_partition_sizes[elementPartition[i]]++;
+                eptr[i + 1] = eptr[i] + mesh.num_nodes_in_elem;
             }
-            
-            std::cout << "\nMesh partitioning result: " << (result2 == METIS_OK ? "Success" : "Failed with code " + std::to_string(result2)) << std::endl;
-            std::cout << "Element partition distribution:" << std::endl;
-            for (int i = 0; i < numProcesses; i++) {
-                std::cout << "Rank " << i << ": " << elem_partition_sizes[i] << " elements" << std::endl;
-            }
-            
-            // Assign each node to the partition that owns the most elements it's part of
-            std::vector<idx_t> meshVertexPartition(num_nodes);
-            for (idx_t i = 0; i < num_nodes; i++) {
-                std::vector<int> partCount(numProcesses, 0);
-                for (idx_t j = elementsPerNode[i]; j < elementsPerNode[i+1]; j++) {
-                    idx_t elem = nodeElements[j];
-                    partCount[elementPartition[elem]]++;
+
+            // Fill eind array
+            idx_t idx = 0;
+            for (idx_t elem_id = 0; elem_id < num_elems; elem_id++) {
+                for (idx_t node_lid = 0; node_lid < mesh.num_nodes_in_elem; node_lid++) {
+                    eind[idx++] = mesh.nodes_in_elem.host(elem_id, node_lid);
                 }
-                
-                // Find the part with the most elements for this node
-                int maxPart = 0;
-                for (int p = 1; p < numProcesses; p++) {
-                    if (partCount[p] > partCount[maxPart]) {
-                        maxPart = p;
-                    }
-                }
-                meshVertexPartition[i] = maxPart;
             }
+
+            // Debug print before calling METIS
+            std::cout << "Mesh information before METIS call:" << std::endl;
+            std::cout << "Number of elements: " << ne << std::endl;
+            std::cout << "Number of nodes: " << nn << std::endl;
+            std::cout << "Nodes per element: " << mesh.num_nodes_in_elem << std::endl;
+            // std::cout << "eptr array: ";
+            // for (const auto& v : eptr) std::cout << v << " ";
+            // std::cout << std::endl;
+            // std::cout << "eind array: ";
+            // for (const auto& v : eind) std::cout << v << " ";
+            // std::cout << std::endl;
+
+            // Set up options properly
+            METIS_SetDefaultOptions(options.data());
+            options[METIS_OPTION_NUMBERING] = 0;      // C-style numbering
+            options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;  // Use recursive bisection
+            options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
             
-            // Count nodes assigned to each part
-            std::vector<int> mesh_partition_sizes(numProcesses, 0);
+            // Call METIS
+            idx_t objval;
+            idx_t nparts = numProcesses;
+            idx_t ret = METIS_PartMeshNodal(
+                &ne,                // number of elements
+                &nn,               // number of nodes
+                eptr.data(),       // element ptr array
+                eind.data(),       // element connectivity array
+                nullptr,           // vertex weights (no weights)
+                nullptr,           // vertex sizes (no sizes)
+                &nparts,           // number of parts
+                nullptr,           // target weights (nullptr for uniform)
+                options.data(),    // options array
+                &objval,           // output: objective value
+                epart.data(),      // output: element partition vector
+                npart.data()       // output: node partition vector
+            );
+
+            if (ret != METIS_OK) {
+                std::cout << "METIS error code: " << ret << std::endl;
+            }
+
+            // // Print the partitioning
+            // std::cout << "Partitioning:" << std::endl;
+            // for (idx_t i = 0; i < num_nodes; i++) {
+            //     std::cout << "Node " << i << " is in partition " << npart[i] << std::endl;
+            // }
+
+            // // Print the element partitioning
+            // std::cout << "Element partitioning:" << std::endl;
+            // for (idx_t i = 0; i < num_elems; i++) {
+            //     std::cout << "Element " << i << " is in partition " << epart[i] << std::endl;
+            // }
+            
+            // Count the number of nodes in each partition
+            std::vector<idx_t> partition_sizes(numProcesses, 0);
             for (idx_t i = 0; i < num_nodes; i++) {
-                mesh_partition_sizes[meshVertexPartition[i]]++;
+                partition_sizes[npart[i]]++;
+            }   
+            
+            // Print the number of nodes in each partition
+            std::cout << "Number of nodes in each partition:" << std::endl;
+            for (idx_t i = 0; i < numProcesses; i++) {
+                std::cout << "Partition " << i << ": " << partition_sizes[i] << " nodes" << std::endl;
             }
             
-            std::cout << "Derived node partition distribution:" << std::endl;
-            for (int i = 0; i < numProcesses; i++) {
-                std::cout << "Rank " << i << ": " << mesh_partition_sizes[i] << " vertices" << std::endl;
-            }
+            // Count the number of elements in each partition
+            std::vector<idx_t> element_sizes(numProcesses, 0);
+            for (idx_t i = 0; i < num_elems; i++) {
+                element_sizes[epart[i]]++;
+            }   
+            
+            // Print the number of elements in each partition
+            std::cout << "Number of elements in each partition:" << std::endl;
+            for (idx_t i = 0; i < numProcesses; i++) {
+                std::cout << "Partition " << i << ": " << element_sizes[i] << " elements" << std::endl;
+            }   
+
+
         }
+
+        
     }
     
     // Finalize Kokkos
