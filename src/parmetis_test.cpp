@@ -270,25 +270,33 @@ int main(int argc, char *argv[]) {
     // Initialize MPI
     MPI_Init(&argc, &argv);
     
-    // Get MPI process info
-    int processRank, numProcesses;
-    MPI_Comm_rank(MPI_COMM_WORLD, &processRank);
-    MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
-
-    MPI_Comm comm;
-    MPI_Comm_dup(MPI_COMM_WORLD, &comm);
-    
     // Initialize Kokkos
     Kokkos::initialize(argc, argv);
     {
+
+        // Get MPI process info
+        int processRank, numProcesses;
+        MPI_Comm_rank(MPI_COMM_WORLD, &processRank);
+        MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
+
+        MPI_Comm comm;
+        MPI_Comm_dup(MPI_COMM_WORLD, &comm);
+    
+
         // Variables to store mesh information
         Mesh_t mesh;
         node_t node;
         size_t num_nodes = 0;
         size_t num_elems = 0;
 
+        // Initialize the elemDistribution vector
+        std::vector<idx_t> elemDistribution(numProcesses+1);
+
         // Only build mesh on rank 0
         if (processRank == 0) {
+
+
+            Mesh_t initial_mesh;
 
             std::vector<double> origin(3);
             origin[0] = 0.0;
@@ -305,130 +313,185 @@ int main(int argc, char *argv[]) {
             num_elems_vec[1] = 20;
             num_elems_vec[2] = 20;
 
-            build_3d_box(mesh, node, origin, length, num_elems_vec);
+            build_3d_box(initial_mesh, node, origin, length, num_elems_vec);
 
-            num_nodes = mesh.num_nodes;
-            num_elems = mesh.num_elems;
-
+            num_nodes = initial_mesh.num_nodes;
+            num_elems = initial_mesh.num_elems;
             std::cout << "**** Mesh built on rank 0 ****" << std::endl;
             std::cout << "Mesh nodes: " << num_nodes << std::endl;
             std::cout << "Mesh elems: " << num_elems << std::endl;
 
-            std::cout << "Number of processes: " << numProcesses << std::endl;
-
-            // Use METIS to partition the mesh
-            // int METIS PartMeshNodal( idx t *ne, idx t *nn, idx t *eptr, idx t *eind, idx t *vwgt, idx t *vsize,
-            // idx t *nparts, real t *tpwgts, idx t *options, idx t *objval, idx t *epart, idx t *npart)
-            idx_t ne = num_elems;
-            idx_t nn = num_nodes;
-            std::vector<idx_t> eptr(num_elems + 1);
-            std::vector<idx_t> eind(num_elems * mesh.num_nodes_in_elem);
-            std::vector<real_t> tpwgts(numProcesses, 1.0/numProcesses);
-            std::vector<idx_t> options(METIS_NOPTIONS);
-            std::vector<idx_t> epart(num_elems);
-            std::vector<idx_t> npart(num_nodes);
-
-            // Initialize options
-            METIS_SetDefaultOptions(options.data());
-            options[METIS_OPTION_NUMBERING] = 0;
-            options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;
-            options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
-            options[METIS_OPTION_CONTIG] = 1;
-
-            // Initialize eptr
-            eptr[0] = 0;
-            for (idx_t i = 0; i < num_elems; i++) {
-                eptr[i + 1] = eptr[i] + mesh.num_nodes_in_elem;
-            }
-
-            // Fill eind array
-            idx_t idx = 0;
-            for (idx_t elem_id = 0; elem_id < num_elems; elem_id++) {
-                for (idx_t node_lid = 0; node_lid < mesh.num_nodes_in_elem; node_lid++) {
-                    eind[idx++] = mesh.nodes_in_elem.host(elem_id, node_lid);
-                }
-            }
-
-            // Debug print before calling METIS
-            std::cout << "Mesh information before METIS call:" << std::endl;
-            std::cout << "Number of elements: " << ne << std::endl;
-            std::cout << "Number of nodes: " << nn << std::endl;
-            std::cout << "Nodes per element: " << mesh.num_nodes_in_elem << std::endl;
-            // std::cout << "eptr array: ";
-            // for (const auto& v : eptr) std::cout << v << " ";
-            // std::cout << std::endl;
-            // std::cout << "eind array: ";
-            // for (const auto& v : eind) std::cout << v << " ";
-            // std::cout << std::endl;
-
-            // Set up options properly
-            METIS_SetDefaultOptions(options.data());
-            options[METIS_OPTION_NUMBERING] = 0;      // C-style numbering
-            options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;  // Use recursive bisection
-            options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
-            
-            // Call METIS
-            idx_t objval;
-            idx_t nparts = numProcesses;
-            idx_t ret = METIS_PartMeshNodal(
-                &ne,                // number of elements
-                &nn,               // number of nodes
-                eptr.data(),       // element ptr array
-                eind.data(),       // element connectivity array
-                nullptr,           // vertex weights (no weights)
-                nullptr,           // vertex sizes (no sizes)
-                &nparts,           // number of parts
-                nullptr,           // target weights (nullptr for uniform)
-                options.data(),    // options array
-                &objval,           // output: objective value
-                epart.data(),      // output: element partition vector
-                npart.data()       // output: node partition vector
-            );
-
-            if (ret != METIS_OK) {
-                std::cout << "METIS error code: " << ret << std::endl;
-            }
-
-            // // Print the partitioning
-            // std::cout << "Partitioning:" << std::endl;
-            // for (idx_t i = 0; i < num_nodes; i++) {
-            //     std::cout << "Node " << i << " is in partition " << npart[i] << std::endl;
-            // }
-
-            // // Print the element partitioning
-            // std::cout << "Element partitioning:" << std::endl;
-            // for (idx_t i = 0; i < num_elems; i++) {
-            //     std::cout << "Element " << i << " is in partition " << epart[i] << std::endl;
-            // }
-            
-            // Count the number of nodes in each partition
-            std::vector<idx_t> partition_sizes(numProcesses, 0);
-            for (idx_t i = 0; i < num_nodes; i++) {
-                partition_sizes[npart[i]]++;
-            }   
-            
-            // Print the number of nodes in each partition
-            std::cout << "Number of nodes in each partition:" << std::endl;
-            for (idx_t i = 0; i < numProcesses; i++) {
-                std::cout << "Partition " << i << ": " << partition_sizes[i] << " nodes" << std::endl;
-            }
-            
-            // Count the number of elements in each partition
-            std::vector<idx_t> element_sizes(numProcesses, 0);
-            for (idx_t i = 0; i < num_elems; i++) {
-                element_sizes[epart[i]]++;
-            }   
-            
-            // Print the number of elements in each partition
-            std::cout << "Number of elements in each partition:" << std::endl;
-            for (idx_t i = 0; i < numProcesses; i++) {
-                std::cout << "Partition " << i << ": " << element_sizes[i] << " elements" << std::endl;
-            }   
-
+            // Communicate mesh information to all ranks
+            MPI_Bcast(&num_nodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(&num_elems, 1, MPI_INT, 0, MPI_COMM_WORLD);   
 
         }
 
+        // Other ranks need to receive the information
+        else {
+            MPI_Bcast(&num_nodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(&num_elems, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        }
+
+        // Calculate elements per process (naïve decomposition)
+        idx_t base_elems_per_proc = num_elems / numProcesses;
+        idx_t remainder = num_elems % numProcesses;
         
+        // Calculate element distribution
+        elemDistribution[0] = 0;
+        for (int i = 0; i < numProcesses; i++) {
+            elemDistribution[i+1] = elemDistribution[i] + base_elems_per_proc;
+            if (i < remainder) {
+                elemDistribution[i+1]++;
+            }
+        }
+        
+        // Calculate local element count for this rank
+        idx_t local_elem_count = elemDistribution[processRank+1] - elemDistribution[processRank];
+        
+        std::cout << "Rank " << processRank << " has " << local_elem_count << " elements" << std::endl;
+        
+        // Local data structures
+        std::vector<idx_t> local_eptr(local_elem_count + 1);
+        std::vector<idx_t> local_eind;
+        
+        // Populate the local data structures
+        if (processRank == 0) {
+            // For rank 0, we already have the mesh
+            size_t nodes_per_elem = initial_mesh.num_nodes_in_elem;
+            
+            // First calculate eptr for all elements
+            std::vector<idx_t> global_eptr(num_elems + 1);
+            global_eptr[0] = 0;
+            for (idx_t i = 0; i < num_elems; i++) {
+                global_eptr[i+1] = global_eptr[i] + nodes_per_elem;
+            }
+            
+            // Then fill global eind array
+            std::vector<idx_t> global_eind(global_eptr[num_elems]);
+            idx_t idx = 0;
+            for (idx_t elem_id = 0; elem_id < num_elems; elem_id++) {
+                for (idx_t node_lid = 0; node_lid < nodes_per_elem; node_lid++) {
+                    global_eind[idx++] = initial_mesh.nodes_in_elem.host(elem_id, node_lid);
+                }
+            }
+            
+            // Now distribute to each rank (including rank 0)
+            for (int proc = 0; proc < numProcesses; proc++) {
+                idx_t proc_elem_start = elemDistribution[proc];
+                idx_t proc_elem_count = elemDistribution[proc+1] - elemDistribution[proc];
+                
+                // Create local data for this processor
+                std::vector<idx_t> proc_eptr(proc_elem_count + 1);
+                proc_eptr[0] = 0;
+                
+                // Calculate offsets for local elements
+                for (idx_t i = 0; i < proc_elem_count; i++) {
+                    idx_t global_elem = proc_elem_start + i;
+                    proc_eptr[i+1] = proc_eptr[i] + (global_eptr[global_elem+1] - global_eptr[global_elem]);
+                }
+                
+                // Gather all node IDs for elements assigned to this processor
+                std::vector<idx_t> proc_eind(proc_eptr[proc_elem_count]);
+                idx_t local_idx = 0;
+                for (idx_t i = 0; i < proc_elem_count; i++) {
+                    idx_t global_elem = proc_elem_start + i;
+                    for (idx_t j = global_eptr[global_elem]; j < global_eptr[global_elem+1]; j++) {
+                        proc_eind[local_idx++] = global_eind[j];
+                    }
+                }
+                
+                // If this is for the current rank, store locally
+                if (proc == processRank) {
+                    local_eptr = proc_eptr;
+                    local_eind = proc_eind;
+                }
+                // Otherwise send to appropriate rank
+                else {
+                    // Send eptr size
+                    int eptr_size = proc_eptr.size();
+                    MPI_Send(&eptr_size, 1, MPI_INT, proc, 0, MPI_COMM_WORLD);
+                    
+                    // Send eptr data
+                    MPI_Send(proc_eptr.data(), eptr_size, MPI_INT, proc, 1, MPI_COMM_WORLD);
+                    
+                    // Send eind size
+                    int eind_size = proc_eind.size();
+                    MPI_Send(&eind_size, 1, MPI_INT, proc, 2, MPI_COMM_WORLD);
+                    
+                    // Send eind data
+                    MPI_Send(proc_eind.data(), eind_size, MPI_INT, proc, 3, MPI_COMM_WORLD);
+                }
+            }
+        }
+        else {
+            // Receive local data from rank 0
+            // Receive eptr size
+            int eptr_size;
+            MPI_Recv(&eptr_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Receive eptr data
+            local_eptr.resize(eptr_size);
+            MPI_Recv(local_eptr.data(), eptr_size, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Receive eind size
+            int eind_size;
+            MPI_Recv(&eind_size, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Receive eind data
+            local_eind.resize(eind_size);
+            MPI_Recv(local_eind.data(), eind_size, MPI_INT, 0, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        
+        // Display information about local data for debugging
+        std::cout << "Rank " << processRank << " local data:" << std::endl;
+        std::cout << "  eptr size: " << local_eptr.size() << std::endl;
+        std::cout << "  eind size: " << local_eind.size() << std::endl;
+        
+        // Each rank can now process its local portion of the mesh
+        idx_t local_ne = local_elem_count;
+        idx_t local_nn = num_nodes; // All nodes initially visible to all ranks
+        
+        // Now we can use METIS on each rank's local portion
+        if (local_ne > 0) {
+            // Allocate arrays for local partitioning
+            std::vector<idx_t> local_epart(local_ne);
+            std::vector<idx_t> local_npart(local_nn);
+            std::vector<idx_t> options(METIS_NOPTIONS);
+            
+            // Set up METIS options
+            METIS_SetDefaultOptions(options.data());
+            options[METIS_OPTION_NUMBERING] = 0;  // C-style numbering
+            options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;  // Recursive bisection
+            
+            // Number of partitions for local partitioning
+            // Can be smaller for better locality or 1 for no further partitioning
+            idx_t local_nparts = 1;  // Just keep as one partition locally
+            
+            // Call METIS on local data
+            idx_t objval;
+            idx_t ret = METIS_PartMeshNodal(
+                &local_ne,           // number of local elements
+                &local_nn,          // number of nodes
+                local_eptr.data(),  // element ptr array
+                local_eind.data(),  // element connectivity array
+                nullptr,            // vertex weights
+                nullptr,            // vertex sizes
+                &local_nparts,      // number of parts (1 for no further partitioning)
+                nullptr,            // target weights
+                options.data(),     // options array
+                &objval,            // output: objective value
+                local_epart.data(), // output: element partition vector
+                local_npart.data()  // output: node partition vector
+            );
+            
+            if (ret != METIS_OK) {
+                std::cout << "Rank " << processRank << ": METIS error code: " << ret << std::endl;
+            }
+            else {
+                std::cout << "Rank " << processRank << ": METIS partitioning successful" << std::endl;
+            }
+        }
     }
     
     // Finalize Kokkos
@@ -439,3 +502,110 @@ int main(int argc, char *argv[]) {
     
     return 0;
 }
+
+
+
+
+// Use METIS to partition the mesh
+            // // int METIS PartMeshNodal( idx t *ne, idx t *nn, idx t *eptr, idx t *eind, idx t *vwgt, idx t *vsize,
+            // // idx t *nparts, real t *tpwgts, idx t *options, idx t *objval, idx t *epart, idx t *npart)
+            // idx_t ne = num_elems;
+            // idx_t nn = num_nodes;
+            // std::vector<idx_t> eptr(num_elems + 1);
+            // std::vector<idx_t> eind(num_elems * mesh.num_nodes_in_elem);
+            // std::vector<real_t> tpwgts(numProcesses, 1.0/numProcesses);
+            // std::vector<idx_t> options(METIS_NOPTIONS);
+            // std::vector<idx_t> epart(num_elems);
+            // std::vector<idx_t> npart(num_nodes);
+
+            // // Initialize options
+            // METIS_SetDefaultOptions(options.data());
+            // options[METIS_OPTION_NUMBERING] = 0;
+            // options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;
+            // options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
+            // options[METIS_OPTION_CONTIG] = 1;
+
+            // // Initialize eptr
+            // eptr[0] = 0;
+            // for (idx_t i = 0; i < num_elems; i++) {
+            //     eptr[i + 1] = eptr[i] + mesh.num_nodes_in_elem;
+            // }
+
+            // // Fill eind array
+            // idx_t idx = 0;
+            // for (idx_t elem_id = 0; elem_id < num_elems; elem_id++) {
+            //     for (idx_t node_lid = 0; node_lid < mesh.num_nodes_in_elem; node_lid++) {
+            //         eind[idx++] = mesh.nodes_in_elem.host(elem_id, node_lid);
+            //     }
+            // }
+
+            // // Debug print before calling METIS
+            // std::cout << "Mesh information before METIS call:" << std::endl;
+            // std::cout << "Number of elements: " << ne << std::endl;
+            // std::cout << "Number of nodes: " << nn << std::endl;
+            // std::cout << "Nodes per element: " << mesh.num_nodes_in_elem << std::endl;
+
+
+            // // Set up options properly
+            // METIS_SetDefaultOptions(options.data());
+            // options[METIS_OPTION_NUMBERING] = 0;      // C-style numbering
+            // options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;  // Use recursive bisection
+            // options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
+            
+            // // Call METIS
+            // idx_t objval;
+            // idx_t nparts = numProcesses;
+            // idx_t ret = METIS_PartMeshNodal(
+            //     &ne,                // number of elements
+            //     &nn,               // number of nodes
+            //     eptr.data(),       // element ptr array
+            //     eind.data(),       // element connectivity array
+            //     nullptr,           // vertex weights (no weights)
+            //     nullptr,           // vertex sizes (no sizes)
+            //     &nparts,           // number of parts
+            //     nullptr,           // target weights (nullptr for uniform)
+            //     options.data(),    // options array
+            //     &objval,           // output: objective value
+            //     epart.data(),      // output: element partition vector
+            //     npart.data()       // output: node partition vector
+            // );
+
+            // if (ret != METIS_OK) {
+            //     std::cout << "METIS error code: " << ret << std::endl;
+            // }
+
+            // // // Print the partitioning
+            // // std::cout << "Partitioning:" << std::endl;
+            // // for (idx_t i = 0; i < num_nodes; i++) {
+            // //     std::cout << "Node " << i << " is in partition " << npart[i] << std::endl;
+            // // }
+
+            // // // Print the element partitioning
+            // // std::cout << "Element partitioning:" << std::endl;
+            // // for (idx_t i = 0; i < num_elems; i++) {
+            // //     std::cout << "Element " << i << " is in partition " << epart[i] << std::endl;
+            // // }
+            
+            // // Count the number of nodes in each partition
+            // std::vector<idx_t> partition_sizes(numProcesses, 0);
+            // for (idx_t i = 0; i < num_nodes; i++) {
+            //     partition_sizes[npart[i]]++;
+            // }   
+            
+            // // Print the number of nodes in each partition
+            // std::cout << "Number of nodes in each partition:" << std::endl;
+            // for (idx_t i = 0; i < numProcesses; i++) {
+            //     std::cout << "Partition " << i << ": " << partition_sizes[i] << " nodes" << std::endl;
+            // }
+            
+            // // Count the number of elements in each partition
+            // std::vector<idx_t> element_sizes(numProcesses, 0);
+            // for (idx_t i = 0; i < num_elems; i++) {
+            //     element_sizes[epart[i]]++;
+            // }   
+            
+            // // Print the number of elements in each partition
+            // std::cout << "Number of elements in each partition:" << std::endl;
+            // for (idx_t i = 0; i < numProcesses; i++) {
+            //     std::cout << "Partition " << i << ": " << element_sizes[i] << " elements" << std::endl;
+            // }   
