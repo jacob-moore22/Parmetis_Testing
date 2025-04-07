@@ -321,6 +321,8 @@ int main(int argc, char *argv[]) {
         // Initialize the elemDistribution vector
         std::vector<idx_t> elemDistribution(numProcesses+1);
 
+        std::vector<idx_t> initial_elem_local_to_global;
+
         // Initialize the adjacency structure
         std::vector<idx_t> eind;
         std::vector<idx_t> eptr;
@@ -399,6 +401,12 @@ int main(int argc, char *argv[]) {
             std::cout << std::endl;
 
 
+            // Initialize the initial_elem_local_to_global vector
+            initial_elem_local_to_global.resize(num_elems_per_rank[0]);
+            for (int i = 0; i < num_elems_per_rank[0]; i++) {
+                initial_elem_local_to_global[i] = i;
+            }
+
             // Build the adjacency structure for rank 0
             int next_elem_start_id = build_element_adjacency_structure(initial_mesh, eptr, eind, num_elems_per_rank[0], 0, 0);
 
@@ -408,8 +416,15 @@ int main(int argc, char *argv[]) {
             std::vector<idx_t> local_eind;
             std::vector<idx_t> local_eptr;
 
+            std::vector<idx_t> tmp_elem_local_to_global;
+
             for (int i = 1; i < numProcesses; i++) {
                 next_elem_start_id = build_element_adjacency_structure(initial_mesh, local_eptr, local_eind, num_elems_per_rank[i], next_elem_start_id, i);
+
+                tmp_elem_local_to_global.resize(num_elems_per_rank[i]);
+                for (int j = 0; j < num_elems_per_rank[i]; j++) {
+                    tmp_elem_local_to_global[j] = next_elem_start_id + j;
+                }
 
                 // First send sizes
                 int eptr_size = local_eptr.size();
@@ -420,6 +435,8 @@ int main(int argc, char *argv[]) {
                 // Then send actual data
                 MPI_Send(local_eptr.data(), eptr_size, MPI_INT, i, 5, MPI_COMM_WORLD);
                 MPI_Send(local_eind.data(), eind_size, MPI_INT, i, 6, MPI_COMM_WORLD);
+
+                MPI_Send(tmp_elem_local_to_global.data(), num_elems_per_rank[i], MPI_INT, i, 7, MPI_COMM_WORLD);
             }
         }
 
@@ -445,6 +462,9 @@ int main(int argc, char *argv[]) {
             // Receive the actual data
             MPI_Recv(eptr.data(), eptr_size, MPI_INT, 0, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Recv(eind.data(), eind_size, MPI_INT, 0, 6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            initial_elem_local_to_global.resize(local_num_elems);
+            MPI_Recv(initial_elem_local_to_global.data(), local_num_elems, MPI_INT, 0, 7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
 
         // Broadcast the elemDistribution to all ranks
@@ -493,217 +513,62 @@ int main(int argc, char *argv[]) {
             part.data(),            // part: output partition array
             &comm                   // comm: MPI communicator
         );
+ 
+        // std::cout << "Rank " << processRank << " part.size(): " << part.size() << std::endl;
 
         // Check the result
         if (ret != METIS_OK) {
             std::cout << "Rank " << processRank << ": ParMETIS returned error: " << ret << std::endl;
-        } else {
-            // Count elements assigned to each partition
-            std::vector<idx_t> local_partition_counts(numProcesses, 0);
-            for (idx_t i = 0; i < local_num_elems; i++) {
-                local_partition_counts[part[i]]++;
-            }
-
-            // Gather all counts to rank 0
-            std::vector<idx_t> global_partition_counts(numProcesses, 0);
-            MPI_Reduce(local_partition_counts.data(), global_partition_counts.data(), 
-                      numProcesses, IDX_T, MPI_SUM, 0, comm);
-
-            // Print results on rank 0
-            if (processRank == 0) {
-                std::cout << "\nParMETIS partitioning results:" << std::endl;
-                std::cout << "Edge cut: " << edgecut << std::endl;
-                std::cout << "Element distribution:" << std::endl;
-                for (int i = 0; i < numProcesses; i++) {
-                    std::cout << "Partition " << i << ": " << 
-                        global_partition_counts[i] << " elements" << std::endl;
-                }
-            }
-
-            // Initialize local mesh data structures on each rank
-            Mesh_t local_mesh;
-            node_t local_node;
-            size_t local_num_elems = 0;
-            size_t local_num_nodes = 0;
-
-            if (processRank == 0) {
-                // On rank 0, we need to:
-                // 1. Create a mapping of elements to processors
-                // 2. Gather unique nodes needed by each processor
-                // 3. Send the data to each processor
-
-                // Create mapping of elements to processors
-                std::vector<std::vector<idx_t>> elements_per_rank(numProcesses);
-                for (int rank = 0; rank < numProcesses; rank++) {
-                    elements_per_rank[rank].reserve(global_partition_counts[rank]);
-                }
-
-                // Verify partition data is valid
-                for (idx_t i = 0; i < initial_mesh.num_elems; i++) {
-                    if (part[i] < 0 || part[i] >= numProcesses) {
-                        std::cerr << "Error: Invalid partition number " << part[i] 
-                                 << " for element " << i << std::endl;
-                        MPI_Abort(comm, 1);
-                    }
-                    elements_per_rank[part[i]].push_back(i);
-                }
-
-                std::cout << "Elements per rank: " << std::endl;
-                for (int rank = 0; rank < numProcesses; rank++) {
-                    std::cout << "Rank " << rank << ": " << elements_per_rank[rank].size() << " elements" << std::endl;
-                }
-
-                // For each processor, gather its unique nodes
-                std::vector<std::set<idx_t>> nodes_per_rank(numProcesses);
-                for (int rank = 0; rank < numProcesses; rank++) {
-                    for (const auto& elem_id : elements_per_rank[rank]) {
-                        if (elem_id >= initial_mesh.num_elems) {
-                            std::cerr << "Error: Invalid element ID " << elem_id << std::endl;
-                            MPI_Abort(comm, 1);
-                        }
-                        for (int node_lid = 0; node_lid < initial_mesh.num_nodes_in_elem; node_lid++) {
-                            idx_t node_id = initial_mesh.nodes_in_elem.host(elem_id, node_lid);
-                            if (node_id >= initial_mesh.num_nodes) {
-                                std::cerr << "Error: Invalid node ID " << node_id << std::endl;
-                                MPI_Abort(comm, 1);
-                            }
-                            nodes_per_rank[rank].insert(node_id);
-                        }
-                    }
-                }
-
-                std::cout << "Nodes per rank: " << std::endl;
-                for (int rank = 0; rank < numProcesses; rank++) {
-                    std::cout << "Rank " << rank << ": " << nodes_per_rank[rank].size() << " nodes" << std::endl;
-                }
-
-                // Send data to each processor
-                for (int rank = 1; rank < numProcesses; rank++) {
-                    // Send number of elements
-                    int num_elems = elements_per_rank[rank].size();
-                    MPI_Send(&num_elems, 1, MPI_INT, rank, 0, comm);
-
-                    // Send number of nodes
-                    int num_nodes = nodes_per_rank[rank].size();
-                    MPI_Send(&num_nodes, 1, MPI_INT, rank, 1, comm);
-
-                    // Send element-node connectivity
-                    std::vector<idx_t> elem_node_conn(num_elems * initial_mesh.num_nodes_in_elem);
-                    for (size_t i = 0; i < elements_per_rank[rank].size(); i++) {
-                        for (int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
-                            elem_node_conn[i * initial_mesh.num_nodes_in_elem + j] = 
-                                initial_mesh.nodes_in_elem.host(elements_per_rank[rank][i], j);
-                        }
-                    }
-                    MPI_Send(elem_node_conn.data(), num_elems * initial_mesh.num_nodes_in_elem, IDX_T, rank, 2, comm);
-
-                    // Send node coordinates
-                    std::vector<double> node_coords(num_nodes * 3);
-                    size_t node_idx = 0;
-                    for (const auto& node_id : nodes_per_rank[rank]) {
-                        if (node_id >= initial_mesh.num_nodes) {
-                            std::cerr << "Error: Invalid node ID " << node_id << " when sending coordinates" << std::endl;
-                            MPI_Abort(comm, 1);
-                        }
-                        node_coords[node_idx * 3] = node.coords.host(0, node_id, 0);
-                        node_coords[node_idx * 3 + 1] = node.coords.host(0, node_id, 1);
-                        node_coords[node_idx * 3 + 2] = node.coords.host(0, node_id, 2);
-                        node_idx++;
-                    }
-                    MPI_Send(node_coords.data(), num_nodes * 3, MPI_DOUBLE, rank, 3, comm);
-                }
-
-                // Set up local mesh for rank 0
-                local_num_elems = elements_per_rank[0].size();
-                local_num_nodes = nodes_per_rank[0].size();
-
-                // Initialize local mesh structures
-                local_mesh.initialize_nodes(local_num_nodes);
-                local_mesh.initialize_elems(local_num_elems, 3); // 3D mesh
-
-                // Initialize node coordinates
-                std::vector<node_state> required_node_state = { node_state::coords };
-                local_node.initialize(2, local_num_nodes, 3, required_node_state); // 2 RK bins, 3D
-
-                // Fill local mesh data
-                // 1. Fill node coordinates
-                size_t node_idx = 0;
-                for (const auto& node_id : nodes_per_rank[0]) {
-                    if (node_id >= initial_mesh.num_nodes) {
-                        std::cerr << "Error: Invalid node ID " << node_id << " when setting up rank 0" << std::endl;
-                        MPI_Abort(comm, 1);
-                    }
-                    local_node.coords.host(0, node_idx, 0) = node.coords.host(0, node_id, 0);
-                    local_node.coords.host(0, node_idx, 1) = node.coords.host(0, node_id, 1);
-                    local_node.coords.host(0, node_idx, 2) = node.coords.host(0, node_id, 2);
-                    node_idx++;
-                }
-
-                // 2. Fill element-node connectivity
-                for (size_t i = 0; i < elements_per_rank[0].size(); i++) {
-                    for (int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
-                        local_mesh.nodes_in_elem.host(i, j) = 
-                            initial_mesh.nodes_in_elem.host(elements_per_rank[0][i], j);
-                    }
-                }
-
-                // Update device data
-                local_node.coords.update_device();
-                local_mesh.nodes_in_elem.update_device();
-
-            } else {
-                // Receive data from rank 0
-                MPI_Recv(&local_num_elems, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
-                MPI_Recv(&local_num_nodes, 1, MPI_INT, 0, 1, comm, MPI_STATUS_IGNORE);
-
-                // Initialize local mesh structures
-                local_mesh.initialize_nodes(local_num_nodes);
-                local_mesh.initialize_elems(local_num_elems, 3); // 3D mesh
-
-                // Initialize node coordinates
-                std::vector<node_state> required_node_state = { node_state::coords };
-                local_node.initialize(2, local_num_nodes, 3, required_node_state); // 2 RK bins, 3D
-
-                // Receive element-node connectivity
-                std::vector<idx_t> elem_node_conn(local_num_elems * local_mesh.num_nodes_in_elem);
-                MPI_Recv(elem_node_conn.data(), local_num_elems * local_mesh.num_nodes_in_elem, 
-                        IDX_T, 0, 2, comm, MPI_STATUS_IGNORE);
-
-                // Receive node coordinates
-                std::vector<double> node_coords(local_num_nodes * 3);
-                MPI_Recv(node_coords.data(), local_num_nodes * 3, MPI_DOUBLE, 0, 3, comm, MPI_STATUS_IGNORE);
-
-                // Fill local mesh data
-                // 1. Fill node coordinates
-                for (size_t i = 0; i < local_num_nodes; i++) {
-                    local_node.coords.host(0, i, 0) = node_coords[i * 3];
-                    local_node.coords.host(0, i, 1) = node_coords[i * 3 + 1];
-                    local_node.coords.host(0, i, 2) = node_coords[i * 3 + 2];
-                }
-
-                // 2. Fill element-node connectivity
-                for (size_t i = 0; i < local_num_elems; i++) {
-                    for (int j = 0; j < local_mesh.num_nodes_in_elem; j++) {
-                        local_mesh.nodes_in_elem.host(i, j) = 
-                            elem_node_conn[i * local_mesh.num_nodes_in_elem + j];
-                    }
-                }
-
-                // Update device data
-                local_node.coords.update_device();
-                local_mesh.nodes_in_elem.update_device();
-            }
-
-            // Build connectivity for local mesh
-            local_mesh.build_connectivity();
-
-            // At this point, each processor has its own local mesh with:
-            // - Local elements and their connectivity
-            // - Local nodes and their coordinates
-            // - Complete connectivity information
+            MPI_Abort(comm, 1);
+        } 
+            
+        // Count elements assigned to each partition
+        std::vector<idx_t> local_partition_counts(numProcesses, 0);
+        for (idx_t i = 0; i < local_num_elems; i++) {
+            local_partition_counts[part[i]]++;
         }
 
-    }
+        // Gather all counts to rank 0
+        std::vector<idx_t> global_partition_counts(numProcesses, 0);
+        MPI_Reduce(local_partition_counts.data(), global_partition_counts.data(), 
+                    numProcesses, IDX_T, MPI_SUM, 0, comm);
+
+        // Print results on rank 0
+        if (processRank == 0) {
+            std::cout << "\nParMETIS partitioning results:" << std::endl;
+            std::cout << "Edge cut: " << edgecut << std::endl;
+            std::cout << "Element distribution:" << std::endl;
+            for (int i = 0; i < numProcesses; i++) {
+                std::cout << "Partition " << i << ": " << 
+                    global_partition_counts[i] << " elements" << std::endl;
+            }
+        }
+
+        for(int i = 0; i < numProcesses; i++){
+
+            if(processRank == i){
+
+                //Pinrt part for this rank
+                std::cout << "Rank " << processRank << " part: ";
+                for (int i = 0; i < local_num_elems; i++) {
+                    std::cout << part[i] << " ";
+                }
+                std::cout << std::endl;
+                
+
+                // Printing elem_local_to_global for this rank
+                std::cout << "Rank " << processRank << " initial_elem_local_to_global: ";
+                for (int i = 0; i < local_num_elems; i++) {
+                    std::cout << initial_elem_local_to_global[i] << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
+        
+
+
+    } // end Kokkos initialize
+
     
     // Finalize Kokkos
     Kokkos::finalize();
@@ -713,110 +578,3 @@ int main(int argc, char *argv[]) {
     
     return 0;
 }
-
-
-
-
-// Use METIS to partition the mesh
-            // // int METIS PartMeshNodal( idx t *ne, idx t *nn, idx t *eptr, idx t *eind, idx t *vwgt, idx t *vsize,
-            // // idx t *nparts, real t *tpwgts, idx t *options, idx t *objval, idx t *epart, idx t *npart)
-            // idx_t ne = num_elems;
-            // idx_t nn = num_nodes;
-            // std::vector<idx_t> eptr(num_elems + 1);
-            // std::vector<idx_t> eind(num_elems * mesh.num_nodes_in_elem);
-            // std::vector<real_t> tpwgts(numProcesses, 1.0/numProcesses);
-            // std::vector<idx_t> options(METIS_NOPTIONS);
-            // std::vector<idx_t> epart(num_elems);
-            // std::vector<idx_t> npart(num_nodes);
-
-            // // Initialize options
-            // METIS_SetDefaultOptions(options.data());
-            // options[METIS_OPTION_NUMBERING] = 0;
-            // options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;
-            // options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
-            // options[METIS_OPTION_CONTIG] = 1;
-
-            // // Initialize eptr
-            // eptr[0] = 0;
-            // for (idx_t i = 0; i < num_elems; i++) {
-            //     eptr[i + 1] = eptr[i] + mesh.num_nodes_in_elem;
-            // }
-
-            // // Fill eind array
-            // idx_t idx = 0;
-            // for (idx_t elem_id = 0; elem_id < num_elems; elem_id++) {
-            //     for (idx_t node_lid = 0; node_lid < mesh.num_nodes_in_elem; node_lid++) {
-            //         eind[idx++] = mesh.nodes_in_elem.host(elem_id, node_lid);
-            //     }
-            // }
-
-            // // Debug print before calling METIS
-            // std::cout << "Mesh information before METIS call:" << std::endl;
-            // std::cout << "Number of elements: " << ne << std::endl;
-            // std::cout << "Number of nodes: " << nn << std::endl;
-            // std::cout << "Nodes per element: " << mesh.num_nodes_in_elem << std::endl;
-
-
-            // // Set up options properly
-            // METIS_SetDefaultOptions(options.data());
-            // options[METIS_OPTION_NUMBERING] = 0;      // C-style numbering
-            // options[METIS_OPTION_PTYPE] = METIS_PTYPE_RB;  // Use recursive bisection
-            // options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
-            
-            // // Call METIS
-            // idx_t objval;
-            // idx_t nparts = numProcesses;
-            // idx_t ret = METIS_PartMeshNodal(
-            //     &ne,                // number of elements
-            //     &nn,               // number of nodes
-            //     eptr.data(),       // element ptr array
-            //     eind.data(),       // element connectivity array
-            //     nullptr,           // vertex weights (no weights)
-            //     nullptr,           // vertex sizes (no sizes)
-            //     &nparts,           // number of parts
-            //     nullptr,           // target weights (nullptr for uniform)
-            //     options.data(),    // options array
-            //     &objval,           // output: objective value
-            //     epart.data(),      // output: element partition vector
-            //     npart.data()       // output: node partition vector
-            // );
-
-            // if (ret != METIS_OK) {
-            //     std::cout << "METIS error code: " << ret << std::endl;
-            // }
-
-            // // // Print the partitioning
-            // // std::cout << "Partitioning:" << std::endl;
-            // // for (idx_t i = 0; i < num_nodes; i++) {
-            // //     std::cout << "Node " << i << " is in partition " << npart[i] << std::endl;
-            // // }
-
-            // // // Print the element partitioning
-            // // std::cout << "Element partitioning:" << std::endl;
-            // // for (idx_t i = 0; i < num_elems; i++) {
-            // //     std::cout << "Element " << i << " is in partition " << epart[i] << std::endl;
-            // // }
-            
-            // // Count the number of nodes in each partition
-            // std::vector<idx_t> partition_sizes(numProcesses, 0);
-            // for (idx_t i = 0; i < num_nodes; i++) {
-            //     partition_sizes[npart[i]]++;
-            // }   
-            
-            // // Print the number of nodes in each partition
-            // std::cout << "Number of nodes in each partition:" << std::endl;
-            // for (idx_t i = 0; i < numProcesses; i++) {
-            //     std::cout << "Partition " << i << ": " << partition_sizes[i] << " nodes" << std::endl;
-            // }
-            
-            // // Count the number of elements in each partition
-            // std::vector<idx_t> element_sizes(numProcesses, 0);
-            // for (idx_t i = 0; i < num_elems; i++) {
-            //     element_sizes[epart[i]]++;
-            // }   
-            
-            // // Print the number of elements in each partition
-            // std::cout << "Number of elements in each partition:" << std::endl;
-            // for (idx_t i = 0; i < numProcesses; i++) {
-            //     std::cout << "Partition " << i << ": " << element_sizes[i] << " elements" << std::endl;
-            // }   
