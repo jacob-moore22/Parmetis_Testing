@@ -315,6 +315,8 @@ int main(int argc, char *argv[]) {
         
         // Mesh data structures
         Mesh_t initial_mesh;  // Initial mesh built on rank 0
+        node_t initial_node;  // Initial node positions on rank 0
+        
         Mesh_t mesh;         // Local mesh for each rank
         node_t node;         // Node data structure
         
@@ -341,12 +343,12 @@ int main(int argc, char *argv[]) {
             
             // Number of elements in each direction
             std::vector<int> num_elems_vec(3);
-            num_elems_vec[0] = 3;  
-            num_elems_vec[1] = 3;
-            num_elems_vec[2] = 3;
+            num_elems_vec[0] = 2;  
+            num_elems_vec[1] = 2;
+            num_elems_vec[2] = 2;
 
             // Build the initial 3D box mesh
-            build_3d_box(initial_mesh, node, origin, length, num_elems_vec);
+            build_3d_box(initial_mesh, initial_node, origin, length, num_elems_vec);
 
             // Get total mesh size
             total_num_elems = initial_mesh.num_elems;
@@ -424,14 +426,15 @@ int main(int argc, char *argv[]) {
             std::vector<idx_t> tmp_elem_local_to_global;
 
             for (int i = 1; i < numProcesses; i++) {
+                
                 // Build adjacency structure for this rank
-                next_elem_start_id = build_element_adjacency_structure(initial_mesh, local_eptr, local_eind, num_elems_per_rank[i], next_elem_start_id, i);
-
-                // Create local to global mapping for this rank
                 tmp_elem_local_to_global.resize(num_elems_per_rank[i]);
                 for (int j = 0; j < num_elems_per_rank[i]; j++) {
                     tmp_elem_local_to_global[j] = next_elem_start_id + j;
                 }
+
+                next_elem_start_id = build_element_adjacency_structure(initial_mesh, local_eptr, local_eind, num_elems_per_rank[i], next_elem_start_id, i);
+
 
                 // Send sizes first
                 int eptr_size = local_eptr.size();
@@ -546,12 +549,12 @@ int main(int argc, char *argv[]) {
         for(int i = 0; i < numProcesses; i++){
             if(processRank == i){
 
-                //Pinrt part for this rank
-                std::cout << "Rank " << processRank << " part: ";
-                for (int i = 0; i < local_num_elems; i++) {
-                    std::cout << part[i] << " ";
-                }
-                std::cout << std::endl;
+                // //Pinrt part for this rank
+                // std::cout << "Rank " << processRank << " part: ";
+                // for (int i = 0; i < local_num_elems; i++) {
+                //     std::cout << part[i] << " ";
+                // }
+                // std::cout << std::endl;
                 
 
                 // Printing elem_local_to_global for this rank
@@ -561,6 +564,7 @@ int main(int argc, char *argv[]) {
                 }
                 std::cout << std::endl;
             }
+            MPI_Barrier(MPI_COMM_WORLD);
         }
 
         // Collect all element IDs that should exist on this rank based on the ParMETIS decomposition
@@ -603,10 +607,18 @@ int main(int argc, char *argv[]) {
         my_elements_to_receive.resize(total_recv_count);
 
         // Exchange element IDs using MPI_Alltoallv
+        // This collective communication operation performs an all-to-all personalized exchange
+        // where each process sends different amounts of data to each other process
         MPI_Alltoallv(
-            all_elements_to_send.data(), send_counts.data(), send_displs.data(), IDX_T,
-            my_elements_to_receive.data(), recv_counts.data(), recv_displs.data(), IDX_T,
-            comm
+            all_elements_to_send.data(),    // [in] Buffer containing all elements to be sent
+            send_counts.data(),             // [in] Array of length numProcesses, send_counts[i] = number of elements to send to rank i
+            send_displs.data(),             // [in] Array of length numProcesses, send_displs[i] = displacement in send buffer for data going to rank i
+            MPI_INT,                        // [in] MPI datatype for the elements
+            my_elements_to_receive.data(),  // [out] Buffer to store received elements
+            recv_counts.data(),             // [in] Array of length numProcesses, recv_counts[i] = number of elements to receive from rank i
+            recv_displs.data(),             // [in] Array of length numProcesses, recv_displs[i] = displacement in receive buffer for data from rank i
+            MPI_INT,                        // [in] MPI datatype for the elements
+            comm                            // [in] MPI communicator
         );
 
         MPI_Barrier(MPI_COMM_WORLD);
@@ -625,9 +637,282 @@ int main(int argc, char *argv[]) {
         }
         std::cout << std::endl;
 
-    } // end Kokkos initialize
+        std::cout << std::endl;
+        std::cout << std::endl;
+        
+        MPI_Barrier(MPI_COMM_WORLD);
 
-    
+        // if(processRank == 0){
+            
+        //     // Build list of nodes that exists on this rank using the parmetis partitioning
+        //     std::vector<idx_t> nodes_to_receive;
+
+        //     std::cout<<"Rank 0: local_num_elems: "<<local_num_elems<<std::endl;
+        //     std::cout<<"Initial mesh num_nodes_in_elem: "<<initial_mesh.num_nodes_in_elem<<std::endl;
+
+        //     for(int i = 0; i < local_num_elems; i++){
+
+        //         int elem_gid = my_elements_to_receive[i];
+        //         std::cout<<"Rank 0: elem_gid: "<<elem_gid<<std::endl;
+        //         for(int j = 0; j < 8; j++){
+        //             idx_t node_gid = initial_mesh.nodes_in_elem(my_elements_to_receive[i], j);
+        //             std::cout<<node_gid<< ", " ;
+        //             nodes_to_receive.push_back(node_gid);
+        //         }
+        //         std::cout<<std::endl;
+        //     }
+
+        //     // Remove duplicates from nodes_to_receive
+        //     std::sort(nodes_to_receive.begin(), nodes_to_receive.end());
+        //     nodes_to_receive.erase(std::unique(nodes_to_receive.begin(), nodes_to_receive.end()), nodes_to_receive.end());
+
+        //     // Print nodes_to_receive
+        //     std::cout << "Rank " << processRank << " nodes_to_receive: ";
+        //     for(int i = 0; i < nodes_to_receive.size(); i++){   
+        //         std::cout << nodes_to_receive[i] << " ";
+        //     }
+        //     std::cout << std::endl;
+
+        //     std::cout<<"Rank 0: nodes_to_receive.size(): "<<nodes_to_receive.size()<<std::endl;
+
+        //     // Initialize node data structure
+        //     node.initialize(1, nodes_to_receive.size(), 3, {node_state::coords});
+
+        //     // Initialize node coordinates
+        //     for(int i = 0; i < nodes_to_receive.size(); i++){
+        //         node.coords(0, i, 0) = initial_node.coords(0, nodes_to_receive[i], 0);
+        //         node.coords(0, i, 1) = initial_node.coords(0, nodes_to_receive[i], 1);
+        //         node.coords(0, i, 2) = initial_node.coords(0, nodes_to_receive[i], 2);
+        //     }   
+        // }
+
+        // Step 7: Distribute nodes to all ranks based on element ownership
+        // This section handles the distribution of node data from rank 0 to all ranks
+        // based on which elements each rank owns after ParMETIS partitioning
+
+        std::vector<idx_t> nodes_to_receive;
+
+        // Array to store node IDs needed by each rank
+        std::vector<std::vector<idx_t>> nodes_per_rank;
+        
+        // Array to store node coordinates for each rank
+        std::vector<std::vector<double>> node_coords_per_rank;
+        
+        if(processRank == 0){
+            // On rank 0, we need to determine which nodes each rank needs based on their elements
+            
+            // Initialize the array to hold node lists for each rank
+            nodes_per_rank.resize(numProcesses);
+            
+            // First, build node lists for all ranks
+            for(int rank = 0; rank < numProcesses; rank++) {
+                // Get the elements assigned to this rank
+                std::vector<idx_t> rank_elements;
+                
+                // Find elements that belong to this rank in the redistributed elements
+                for(int i = 0; i < my_elements_to_receive.size(); i++) {
+                    if(part[i] == rank) {
+                        rank_elements.push_back(my_elements_to_receive[i]);
+                    }
+                }
+                
+                // For each element, find all its nodes and add them to the node list
+                for(int i = 0; i < rank_elements.size(); i++) {
+                    int elem_gid = rank_elements[i];
+                    for(int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
+                        idx_t node_gid = initial_mesh.nodes_in_elem.host(elem_gid, j);
+                        nodes_per_rank[rank].push_back(node_gid);
+                    }
+                }
+                
+                // Remove duplicates from the node list
+                std::sort(nodes_per_rank[rank].begin(), nodes_per_rank[rank].end());
+                nodes_per_rank[rank].erase(
+                    std::unique(nodes_per_rank[rank].begin(), nodes_per_rank[rank].end()), 
+                    nodes_per_rank[rank].end()
+                );
+
+
+                // Print info about the node list for this rank
+                std::cout << "Rank 0: Preparing to send " << nodes_per_rank[rank].size() 
+                          << " nodes to rank " << rank << std::endl;
+
+                
+            }
+            
+            // Now prepare the coordinate data for each node list
+            node_coords_per_rank.resize(numProcesses);
+            for(int rank = 0; rank < numProcesses; rank++) {
+                // For each node in this rank's list, extract its coordinates
+                node_coords_per_rank[rank].resize(nodes_per_rank[rank].size() * 3); // 3 coordinates per node
+                
+                for(int i = 0; i < nodes_per_rank[rank].size(); i++) {
+                    idx_t node_gid = nodes_per_rank[rank][i];
+                    node_coords_per_rank[rank][i*3 + 0] = initial_node.coords.host(0, node_gid, 0);
+                    node_coords_per_rank[rank][i*3 + 1] = initial_node.coords.host(0, node_gid, 1);
+                    node_coords_per_rank[rank][i*3 + 2] = initial_node.coords.host(0, node_gid, 2);
+                }
+            }
+            
+            // Rank 0 keeps its own data
+            nodes_to_receive.resize(nodes_per_rank[0].size());
+            nodes_to_receive = nodes_per_rank[0];
+            std::vector<double> node_coords = node_coords_per_rank[0];
+            
+            // Initialize node data structure for rank 0
+            node.initialize(1, nodes_to_receive.size(), 3, {node_state::coords});
+            
+            // Copy coordinates to the node data structure
+            for(int i = 0; i < nodes_to_receive.size(); i++) {
+                node.coords.host(0, i, 0) = node_coords[i*3 + 0];
+                node.coords.host(0, i, 1) = node_coords[i*3 + 1];
+                node.coords.host(0, i, 2) = node_coords[i*3 + 2];
+            }
+            node.coords.update_device();
+            
+            // Send node data to all other ranks
+            for(int rank = 1; rank < numProcesses; rank++) {
+                // Send number of nodes first
+                int num_nodes = nodes_per_rank[rank].size();
+                MPI_Send(&num_nodes, 1, MPI_INT, rank, 10, MPI_COMM_WORLD);
+                
+                // Send the list of node IDs
+                MPI_Send(nodes_per_rank[rank].data(), num_nodes, MPI_INT, rank, 11, MPI_COMM_WORLD);
+                
+                // Send the node coordinates (3 coordinates per node)
+                MPI_Send(node_coords_per_rank[rank].data(), num_nodes * 3, MPI_DOUBLE, rank, 12, MPI_COMM_WORLD);
+            }
+            
+            // Print summary of node distribution
+            std::cout << "Rank 0: Finished distributing nodes to all ranks" << std::endl;
+        }
+        else {
+            // Other ranks need to receive their node data from rank 0
+            
+            // Receive the number of nodes first
+            int num_nodes;
+            MPI_Recv(&num_nodes, 1, MPI_INT, 0, 10, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Allocate space and receive the list of node IDs
+            nodes_to_receive.resize(num_nodes);
+            MPI_Recv(nodes_to_receive.data(), num_nodes, MPI_INT, 0, 11, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Allocate space and receive the node coordinates
+            std::vector<double> node_coords(num_nodes * 3);
+            MPI_Recv(node_coords.data(), num_nodes * 3, MPI_DOUBLE, 0, 12, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            // Initialize the node data structure
+            node.initialize(1, num_nodes, 3, {node_state::coords});
+            
+            // Copy the coordinates to the node data structure
+            for(int i = 0; i < num_nodes; i++) {
+                node.coords.host(0, i, 0) = node_coords[i*3 + 0];
+                node.coords.host(0, i, 1) = node_coords[i*3 + 1];
+                node.coords.host(0, i, 2) = node_coords[i*3 + 2];
+            }
+            node.coords.update_device();
+            
+
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        std::cout << std::endl;
+        std::cout << std::endl;
+
+
+        int num_nodes = nodes_to_receive.size();
+        // Print summary of received node data
+        std::cout << "Rank " << processRank << ": Received " << num_nodes 
+                  << " nodes from rank 0" << std::endl;
+            
+        // Print the first few nodes for verification
+        std::cout << "Rank " << processRank << " node IDs: ";
+        for(int i = 0; i < std::min(30, num_nodes); i++) {
+            std::cout << nodes_to_receive[i] << " ";
+        }
+        if(num_nodes > 30) std::cout << "...";
+        std::cout << std::endl;
+
+
+        
+        // Step 8: Initialize local mesh with the elements from ParMETIS partitioning
+        
+        // Create a mapping from global to local node IDs for each rank
+        std::map<idx_t, int> global_to_local_node_map;
+        
+        // // Each rank builds its own mesh based on the received elements and nodes
+        // mesh.initialize_elems(my_elements_to_receive.size(), 3);
+        
+        // if(processRank == 0) {
+        //     // Build global to local node map
+        //     for(int i = 0; i < nodes_per_rank[0].size(); i++) {
+        //         global_to_local_node_map[nodes_per_rank[0][i]] = i;
+        //     }
+            
+        //     // Fill in the local mesh connectivity
+        //     for(int i = 0; i < my_elements_to_receive.size(); i++) {
+        //         int elem_gid = my_elements_to_receive[i];
+        //         for(int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
+        //             idx_t global_node_id = initial_mesh.nodes_in_elem.host(elem_gid, j);
+        //             int local_node_id = global_to_local_node_map[global_node_id];
+        //             mesh.nodes_in_elem.host(i, j) = local_node_id;
+        //         }
+        //     }
+        // }
+        // else {
+        //     // Other ranks need to receive element-to-node connectivity information
+            
+        //     // Build global to local node map based on the received node IDs
+        //     std::vector<idx_t> nodes_to_receive(node.coords.dims(1));
+        //     // Note: In a real implementation, we would need to receive the node IDs as well
+        //     for(int i = 0; i < nodes_to_receive.size(); i++) {
+        //         global_to_local_node_map[nodes_to_receive[i]] = i;
+        //     }
+            
+        //     // Receive element-to-node connectivity from rank 0
+        //     // This is a simplified version - in a real implementation we would need 
+        //     // more complex communication to get the actual element-to-node connectivity
+            
+        //     // For demonstration, just fill with placeholder values
+        //     for(int i = 0; i < my_elements_to_receive.size(); i++) {
+        //         for(int j = 0; j < mesh.num_nodes_in_elem; j++) {
+        //             mesh.nodes_in_elem.host(i, j) = j % nodes_to_receive.size();
+        //         }
+        //     }
+        // }
+
+        // MPI_Barrier(MPI_COMM_WORLD);
+
+
+        // std::cout << std::endl;
+        // std::cout << std::endl;
+        // std::cout << std::endl;
+        
+ 
+
+        // // Print the global ids of the nods on this rank
+        // std::cout << "Rank " << processRank << " nodes_in_elem: ";
+        // for(int i = 0; i < mesh.nodes_in_elem.size(); i++) {
+        //     std::cout << mesh.nodes_in_elem.host(i, 0) << " ";
+        // }
+        // std::cout << std::endl;
+        
+        // // Update device side of mesh connectivity
+        // mesh.nodes_in_elem.update_device();
+        
+        // // Finalize mesh initialization
+        // int num_corners = my_elements_to_receive.size() * mesh.num_nodes_in_elem;
+        // mesh.initialize_corners(num_corners);
+        // mesh.build_connectivity();
+        
+        // std::cout << "Rank " << processRank << ": Local mesh initialized with " 
+        //           << mesh.num_elems << " elements and "
+        //           << node.coords.dims(1) << " nodes" << std::endl;
+        
+        
+
+    } // end Kokkos initialize
     // Finalize Kokkos
     Kokkos::finalize();
     
