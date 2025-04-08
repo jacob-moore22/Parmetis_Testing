@@ -287,146 +287,153 @@ void validate_parmetis_input(const std::vector<idx_t>& vertexDistribution,
 
 /**
  * Main function to demonstrate ParMETIS graph partitioning with MATAR
+ * 
+ * The decomposition process follows these steps:
+ * 1. Initialize MPI and Kokkos
+ * 2. Build initial mesh on rank 0
+ * 3. Distribute mesh information to all ranks
+ * 4. Build adjacency structures for ParMETIS
+ * 5. Perform ParMETIS partitioning
+ * 6. Redistribute elements based on partitioning
  */
 int main(int argc, char *argv[]) {
-    // Initialize MPI
+    // Initialize MPI - required for distributed memory parallelism
     MPI_Init(&argc, &argv);
     
-    // Initialize Kokkos
+    // Initialize Kokkos - required for shared memory parallelism
     Kokkos::initialize(argc, argv);
     {
 
-        // Get MPI process info
+        // Get MPI process info - each process needs to know its rank and total number of processes
         int processRank, numProcesses;
         MPI_Comm_rank(MPI_COMM_WORLD, &processRank);
         MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
 
+        // Create a duplicate communicator for ParMETIS to use
         MPI_Comm comm;
         MPI_Comm_dup(MPI_COMM_WORLD, &comm);
         
+        // Mesh data structures
+        Mesh_t initial_mesh;  // Initial mesh built on rank 0
+        Mesh_t mesh;         // Local mesh for each rank
+        node_t node;         // Node data structure
         
-        Mesh_t initial_mesh;
+        // Mesh size information
+        size_t total_num_nodes = 0;  // Total nodes in entire mesh
+        size_t total_num_elems = 0;  // Total elements in entire mesh
+        size_t local_num_elems = 0;  // Elements assigned to this rank
+        size_t local_num_nodes = 0;  // Nodes assigned to this rank
 
-        // Variables to store mesh information
-        Mesh_t mesh;
-        node_t node;
-        
-        size_t total_num_nodes = 0;
-        size_t total_num_elems = 0;
-        
-        size_t local_num_elems = 0;
-        size_t local_num_nodes = 0;
+        // ParMETIS data structures
+        std::vector<idx_t> elemDistribution(numProcesses+1);  // Distribution of elements across ranks
+        std::vector<idx_t> initial_elem_local_to_global;      // Mapping from local to global element IDs
+        std::vector<idx_t> eind;  // Element connectivity array for ParMETIS
+        std::vector<idx_t> eptr;  // Element pointer array for ParMETIS
 
-
-        // Initialize the elemDistribution vector
-        std::vector<idx_t> elemDistribution(numProcesses+1);
-
-        std::vector<idx_t> initial_elem_local_to_global;
-
-        // Initialize the adjacency structure
-        std::vector<idx_t> eind;
-        std::vector<idx_t> eptr;
-
-        // Only build mesh on rank 0
+        // Step 1: Build initial mesh on rank 0
         if (processRank == 0) {
-            
-            // Mesh_t initial_mesh;
-
-            std::vector<double> origin(3);
-            origin[0] = 0.0;
-            origin[1] = 0.0;
-            origin[2] = 0.0;
-
-            std::vector<double> length(3);
-            length[0] = 2.0;
-            length[1] = 1.0;
+            // Define mesh parameters
+            std::vector<double> origin(3, 0.0);  // Origin point of the mesh
+            std::vector<double> length(3);       // Lengths in x,y,z directions
+            length[0] = 2.0; 
+            length[1] = 1.0; 
             length[2] = 1.0;
-
+            
+            // Number of elements in each direction
             std::vector<int> num_elems_vec(3);
             num_elems_vec[0] = 3;  
             num_elems_vec[1] = 3;
             num_elems_vec[2] = 3;
 
+            // Build the initial 3D box mesh
             build_3d_box(initial_mesh, node, origin, length, num_elems_vec);
 
-            total_num_elems = initial_mesh.num_nodes;
+            // Get total mesh size
             total_num_elems = initial_mesh.num_elems;
+            total_num_nodes = initial_mesh.num_nodes;
             
+            // Print mesh information
             std::cout << "**** Mesh built on rank 0 ****" << std::endl;
             std::cout << "Mesh nodes: " << total_num_nodes << std::endl;
             std::cout << "Mesh elems: " << total_num_elems << std::endl;
 
-            // Communicate mesh information to all ranks
+            // Step 2: Distribute mesh information to all ranks
+            // Send total mesh size to all other ranks
             for (int rank = 1; rank < numProcesses; rank++) {
                 MPI_Send(&total_num_nodes, 1, MPI_INT, rank, 0, MPI_COMM_WORLD);
                 MPI_Send(&total_num_elems, 1, MPI_INT, rank, 1, MPI_COMM_WORLD);
             }
 
+            // Step 3: Calculate element distribution across ranks
             // Create vector to store the number of elements per rank
             std::vector<idx_t> num_elems_per_rank(numProcesses);
 
-            // Calculate the number of elements per rank, accounting for remainders
+            // Calculate base number of elements per rank and remainder
             idx_t base_elems_per_proc = total_num_elems / numProcesses;
             idx_t remainder = total_num_elems % numProcesses;
             
+            // Distribute elements evenly, with remainder distributed to first few ranks
             for (int i = 0; i < numProcesses; i++) {
                 num_elems_per_rank[i] = base_elems_per_proc;
                 if (i < remainder) {
                     num_elems_per_rank[i]++;
                 }
             }
+
+            // Build element distribution array for ParMETIS
             elemDistribution[0] = 0;
             for (int i = 1; i < numProcesses + 1; i++) {
                 elemDistribution[i] = elemDistribution[i-1] + num_elems_per_rank[i-1];
             }
-            // Print the elemDistribution
+
+            // Print distribution information
             std::cout << "ElemDistribution: ";
             for (int i = 0; i < numProcesses + 1; i++) {
                 std::cout << elemDistribution[i] << " ";
             }
             std::cout << std::endl;
 
-
+            // Set local element count for rank 0
             local_num_elems = num_elems_per_rank[0];
 
+            // Send number of elements to other ranks
             for(int i = 1; i < numProcesses; i++){
                 MPI_Send(&num_elems_per_rank[i], 1, MPI_INT, i, 2, MPI_COMM_WORLD);
             }
 
-            // Print the number of elements per rank
+            // Print element distribution across ranks
             std::cout << "Number of elements per rank: ";
             for (int i = 0; i < numProcesses; i++) {
                 std::cout << num_elems_per_rank[i] << " ";
             }
             std::cout << std::endl;
 
-
-            // Initialize the initial_elem_local_to_global vector
+            // Initialize local to global mapping for rank 0
             initial_elem_local_to_global.resize(num_elems_per_rank[0]);
             for (int i = 0; i < num_elems_per_rank[0]; i++) {
                 initial_elem_local_to_global[i] = i;
             }
 
-            // Build the adjacency structure for rank 0
+            // Step 4: Build adjacency structures for ParMETIS
+            // Build adjacency structure for rank 0
             int next_elem_start_id = build_element_adjacency_structure(initial_mesh, eptr, eind, num_elems_per_rank[0], 0, 0);
 
-
-            // Build the adjacency structure for the other ranks
-            // Initialize the adjacency structure
+            // Build and send adjacency structures for other ranks
             std::vector<idx_t> local_eind;
             std::vector<idx_t> local_eptr;
-
             std::vector<idx_t> tmp_elem_local_to_global;
 
             for (int i = 1; i < numProcesses; i++) {
+                // Build adjacency structure for this rank
                 next_elem_start_id = build_element_adjacency_structure(initial_mesh, local_eptr, local_eind, num_elems_per_rank[i], next_elem_start_id, i);
 
+                // Create local to global mapping for this rank
                 tmp_elem_local_to_global.resize(num_elems_per_rank[i]);
                 for (int j = 0; j < num_elems_per_rank[i]; j++) {
                     tmp_elem_local_to_global[j] = next_elem_start_id + j;
                 }
 
-                // First send sizes
+                // Send sizes first
                 int eptr_size = local_eptr.size();
                 int eind_size = local_eind.size();
                 MPI_Send(&eptr_size, 1, MPI_INT, i, 3, MPI_COMM_WORLD);
@@ -435,59 +442,50 @@ int main(int argc, char *argv[]) {
                 // Then send actual data
                 MPI_Send(local_eptr.data(), eptr_size, MPI_INT, i, 5, MPI_COMM_WORLD);
                 MPI_Send(local_eind.data(), eind_size, MPI_INT, i, 6, MPI_COMM_WORLD);
-
                 MPI_Send(tmp_elem_local_to_global.data(), num_elems_per_rank[i], MPI_INT, i, 7, MPI_COMM_WORLD);
             }
         }
-
-        // Other ranks need to receive the information
+        // Step 2 (continued): Other ranks receive mesh information
         else {
+            // Receive total mesh size
             MPI_Recv(&total_num_nodes, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Recv(&total_num_elems, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
+            // Receive number of elements for this rank
             MPI_Recv(&local_num_elems, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
+            // Allocate space for adjacency structures
             eptr.resize(local_num_elems + 1);
             eind.resize(8 * local_num_elems); // WARNING: Assumed 8 nodes per element, FIX LATER
 
-            // First receive sizes
+            // Receive sizes first
             int eptr_size, eind_size;
             MPI_Recv(&eptr_size, 1, MPI_INT, 0, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Recv(&eind_size, 1, MPI_INT, 0, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-            // Resize vectors accordingly
+            // Resize vectors
             eptr.resize(eptr_size);
             eind.resize(eind_size);
 
-            // Receive the actual data
+            // Receive actual data
             MPI_Recv(eptr.data(), eptr_size, MPI_INT, 0, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Recv(eind.data(), eind_size, MPI_INT, 0, 6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
+            // Receive local to global mapping
             initial_elem_local_to_global.resize(local_num_elems);
             MPI_Recv(initial_elem_local_to_global.data(), local_num_elems, MPI_INT, 0, 7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
 
-        // Broadcast the elemDistribution to all ranks
+        // Broadcast element distribution to all ranks
         MPI_Bcast(elemDistribution.data(), numProcesses+1, MPI_INT, 0, MPI_COMM_WORLD);
         
         MPI_Barrier(MPI_COMM_WORLD);
 
-        if(processRank == 2){
-            // Print the elemDistribution
-            std::cout << "ElemDistribution: ";
-            for (int i = 0; i < numProcesses + 1; i++) {
-                std::cout << elemDistribution[i] << " ";
-            }
-            std::cout << std::endl;
-        }   
-        
-        std::cout << "local_num_elems: " << local_num_elems << std::endl;    
-       
-        // Set up ParMETIS parameters
+        // Step 5: Set up ParMETIS parameters
         idx_t wgtflag = 0;         // No weights
         idx_t numflag = 0;         // C-style numbering
         idx_t ncon = 1;            // Number of weights per vertex
-        idx_t ncommonnodes = 1;    // Number of common nodes needed for adjacency(NOTE: This may need to be 1 for corners, or 2 for edges)
+        idx_t ncommonnodes = 1;    // Number of common nodes needed for adjacency
         idx_t nparts = numProcesses;
         std::vector<real_t> tpwgts(nparts, 1.0/nparts);  // Target partition weights
         std::vector<real_t> ubvec(ncon, 1.05);           // Load imbalance tolerance
@@ -495,7 +493,7 @@ int main(int argc, char *argv[]) {
         idx_t edgecut;                                    // Output: Number of edges cut
         std::vector<idx_t> part(local_num_elems);        // Output: Partition vector
 
-
+        // Call ParMETIS to perform partitioning
         int ret = ParMETIS_V3_PartMeshKway(
             elemDistribution.data(),  // elmdist: element distribution array
             eptr.data(),             // eptr: element pointer array
@@ -514,21 +512,20 @@ int main(int argc, char *argv[]) {
             &comm                   // comm: MPI communicator
         );
  
-        // std::cout << "Rank " << processRank << " part.size(): " << part.size() << std::endl;
-
-        // Check the result
+        // Check ParMETIS result
         if (ret != METIS_OK) {
             std::cout << "Rank " << processRank << ": ParMETIS returned error: " << ret << std::endl;
             MPI_Abort(comm, 1);
         } 
             
-        // Count elements assigned to each partition
+        // Step 6: Analyze partitioning results
+        // Count elements assigned to each partition locally
         std::vector<idx_t> local_partition_counts(numProcesses, 0);
         for (idx_t i = 0; i < local_num_elems; i++) {
             local_partition_counts[part[i]]++;
         }
 
-        // Gather all counts to rank 0
+        // Gather all counts to rank 0 for analysis
         std::vector<idx_t> global_partition_counts(numProcesses, 0);
         MPI_Reduce(local_partition_counts.data(), global_partition_counts.data(), 
                     numProcesses, IDX_T, MPI_SUM, 0, comm);
@@ -544,8 +541,9 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        for(int i = 0; i < numProcesses; i++){
+        MPI_Barrier(MPI_COMM_WORLD);
 
+        for(int i = 0; i < numProcesses; i++){
             if(processRank == i){
 
                 //Pinrt part for this rank
@@ -564,8 +562,68 @@ int main(int argc, char *argv[]) {
                 std::cout << std::endl;
             }
         }
-        
 
+        // Collect all element IDs that should exist on this rank based on the ParMETIS decomposition
+        std::vector<idx_t> my_elements_to_receive; // Will store global IDs of elements assigned to this rank
+        std::vector<int> send_counts(numProcesses, 0);  // How many elements to send to each rank
+        std::vector<std::vector<idx_t>> elements_to_send(numProcesses); // The actual elements to send to each rank
+
+        // Determine which elements need to be sent where
+        for (idx_t i = 0; i < local_num_elems; i++) {
+            int target_rank = part[i];  // The rank this element should go to
+            send_counts[target_rank]++;
+            elements_to_send[target_rank].push_back(initial_elem_local_to_global[i]);
+        }
+
+        // Exchange information about how many elements each rank will receive
+        std::vector<int> recv_counts(numProcesses, 0);
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+
+        // Calculate displacements for MPI_Alltoallv
+        std::vector<int> send_displs(numProcesses, 0);
+        std::vector<int> recv_displs(numProcesses, 0);
+        for (int i = 1; i < numProcesses; i++) {
+            send_displs[i] = send_displs[i-1] + send_counts[i-1];
+            recv_displs[i] = recv_displs[i-1] + recv_counts[i-1];
+        }
+
+        // Calculate the total number of elements to receive
+        int total_recv_count = 0;
+        for (int i = 0; i < numProcesses; i++) {
+            total_recv_count += recv_counts[i];
+        }
+
+        // Flatten send data for MPI_Alltoallv
+        std::vector<idx_t> all_elements_to_send;
+        for (int i = 0; i < numProcesses; i++) {
+            all_elements_to_send.insert(all_elements_to_send.end(), elements_to_send[i].begin(), elements_to_send[i].end());
+        }
+
+        // Prepare receive buffer
+        my_elements_to_receive.resize(total_recv_count);
+
+        // Exchange element IDs using MPI_Alltoallv
+        MPI_Alltoallv(
+            all_elements_to_send.data(), send_counts.data(), send_displs.data(), IDX_T,
+            my_elements_to_receive.data(), recv_counts.data(), recv_displs.data(), IDX_T,
+            comm
+        );
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        // Sort received elements for easier lookup
+        std::sort(my_elements_to_receive.begin(), my_elements_to_receive.end());
+
+        // Print received elements for verification
+        std::cout << "Rank " << processRank << " received " << my_elements_to_receive.size() 
+                << " elements after redistribution: ";
+        for (size_t i = 0; i < std::min(size_t(20), my_elements_to_receive.size()); i++) {
+            std::cout << my_elements_to_receive[i] << " ";
+        }
+        if (my_elements_to_receive.size() > 20) {
+            std::cout << "... (and " << my_elements_to_receive.size() - 20 << " more)";
+        }
+        std::cout << std::endl;
 
     } // end Kokkos initialize
 
