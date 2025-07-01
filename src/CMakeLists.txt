@@ -7,6 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find MPI
 find_package(MPI REQUIRED)
 
+# Set MPI compiler wrappers
+set(CMAKE_CXX_COMPILER mpicxx)
+set(CMAKE_C_COMPILER mpicc)
+
+# Check if MPI was found
+if(MPI_FOUND)
+    message(STATUS "MPI found")
+    include_directories(${MPI_INCLUDE_PATH})
+    include_directories(${MPI_CXX_INCLUDE_PATH})
+endif()
+
 # Find Kokkos
 find_package(Kokkos REQUIRED)
 
@@ -14,17 +25,11 @@ add_definitions(-DHAVE_KOKKOS=1)
 
 # Set multiple potential include paths to find MATAR
 include_directories(
-  "/var/tmp/repos/Parmetis_Testing/src/../MATAR"
-  "/../MATAR"
-  "/../MATAR"
-  "/../MATAR"
-)
-
-include_directories(
-  "/var/tmp/repos/Parmetis_Testing/src/../include"
-  "/../include"
-  "/../include"
-  "/../include"
+    "/var/tmp/repos/Parmetis_Testing/src/../MATAR"
+    "/var/tmp/repos/Parmetis_Testing/src/../include"
+    "/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_parmetis/include"
+    "/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_metis/include"
+    "/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_gklib/include"
 )
 
 message(STATUS "CMAKE_SOURCE_DIR absolute path: ")
@@ -38,16 +43,19 @@ message(STATUS "Primary MATAR include path: /var/tmp/repos/Parmetis_Testing/src/
 
 # Create the executable
 add_executable(parmetis_test parmetis_test.cpp)
-target_link_libraries(parmetis_test Kokkos::kokkos)
 
-# Check if MPI was found
-if(MPI_FOUND)
-  message(STATUS "MPI found")
-  # Include directories for MPI
-  include_directories(${MPI_INCLUDE_PATH})
-  include_directories(${MPI_CXX_INCLUDE_PATH})
+# Link libraries - note the order matters
+target_link_libraries(parmetis_test 
+    PRIVATE
+    MPI::MPI_CXX
+    Kokkos::kokkos
+    -L/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_parmetis/lib -lparmetis
+    -L/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_metis/lib -lmetis
+    -L/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_gklib/lib -lGKlib
+)
 
-  # Link your target with MPI libraries
-  target_link_libraries(parmetis_test )
-endif()
-
+# Set rpath for runtime library loading
+set_target_properties(parmetis_test PROPERTIES
+    INSTALL_RPATH "/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_parmetis/lib:/var/tmp/repos/Parmetis_Testing/src/../parmetis/install_metis/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+)

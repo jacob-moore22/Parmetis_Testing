@@ -10,6 +10,13 @@
 #include "mesh.h"
 
 
+/*
+mpirun -np 2 ./parmetis_test
+
+
+*/
+
+
 // Possible node states, used to initialize node_t
 enum class node_state
 {
@@ -635,8 +642,7 @@ int main(int argc, char *argv[]) {
         if (my_elements_to_receive.size() > 20) {
             std::cout << "... (and " << my_elements_to_receive.size() - 20 << " more)";
         }
-        std::cout << std::endl;
-
+ 
         std::cout << std::endl;
         std::cout << std::endl;
         
@@ -704,21 +710,37 @@ int main(int argc, char *argv[]) {
             // Initialize the array to hold node lists for each rank
             nodes_per_rank.resize(numProcesses);
             
-            // First, build node lists for all ranks
-            for(int rank = 0; rank < numProcesses; rank++) {
-                // Get the elements assigned to this rank
-                std::vector<idx_t> rank_elements;
-                
-                // Find elements that belong to this rank in the redistributed elements
-                for(int i = 0; i < my_elements_to_receive.size(); i++) {
-                    if(part[i] == rank) {
-                        rank_elements.push_back(my_elements_to_receive[i]);
-                    }
+            // Gather all elements from all ranks to rank 0
+            std::vector<int> all_recv_counts(numProcesses);
+            MPI_Gather(&total_recv_count, 1, MPI_INT, all_recv_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Calculate total elements and displacements for gathering
+            int total_elems = 0;
+            std::vector<int> all_recv_displs(numProcesses, 0);
+            for(int i = 0; i < numProcesses; i++) {
+                total_elems += all_recv_counts[i];
+                if(i > 0) {
+                    all_recv_displs[i] = all_recv_displs[i-1] + all_recv_counts[i-1];
                 }
+            }
+            
+            // Gather all elements to rank 0
+            std::vector<idx_t> all_elements(total_elems);
+            MPI_Gatherv(my_elements_to_receive.data(), total_recv_count, MPI_INT,
+                        all_elements.data(), all_recv_counts.data(), all_recv_displs.data(),
+                        MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Now build node lists for all ranks
+            for(int rank = 0; rank < numProcesses; rank++) {
+                // Get the starting index for this rank's elements
+                int start_idx = all_recv_displs[rank];
+                int count = all_recv_counts[rank];
                 
-                // For each element, find all its nodes and add them to the node list
-                for(int i = 0; i < rank_elements.size(); i++) {
-                    int elem_gid = rank_elements[i];
+                // Process each element assigned to this rank
+                for(int i = 0; i < count; i++) {
+                    int elem_gid = all_elements[start_idx + i];
+                    
+                    // Get the nodes for this element
                     for(int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
                         idx_t node_gid = initial_mesh.nodes_in_elem.host(elem_gid, j);
                         nodes_per_rank[rank].push_back(node_gid);
@@ -732,12 +754,9 @@ int main(int argc, char *argv[]) {
                     nodes_per_rank[rank].end()
                 );
 
-
                 // Print info about the node list for this rank
                 std::cout << "Rank 0: Preparing to send " << nodes_per_rank[rank].size() 
                           << " nodes to rank " << rank << std::endl;
-
-                
             }
             
             // Now prepare the coordinate data for each node list
@@ -787,7 +806,12 @@ int main(int argc, char *argv[]) {
             std::cout << "Rank 0: Finished distributing nodes to all ranks" << std::endl;
         }
         else {
-            // Other ranks need to receive their node data from rank 0
+            // Other ranks need to send their element count to rank 0
+            MPI_Gather(&total_recv_count, 1, MPI_INT, nullptr, 0, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Send elements to rank 0
+            MPI_Gatherv(my_elements_to_receive.data(), total_recv_count, MPI_INT,
+                        nullptr, nullptr, nullptr, MPI_INT, 0, MPI_COMM_WORLD);
             
             // Receive the number of nodes first
             int num_nodes;
@@ -811,8 +835,6 @@ int main(int argc, char *argv[]) {
                 node.coords.host(0, i, 2) = node_coords[i*3 + 2];
             }
             node.coords.update_device();
-            
-
         }
 
         MPI_Barrier(MPI_COMM_WORLD);
@@ -821,96 +843,24 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
 
 
-        int num_nodes = nodes_to_receive.size();
-        // Print summary of received node data
-        std::cout << "Rank " << processRank << ": Received " << num_nodes 
-                  << " nodes from rank 0" << std::endl;
-            
-        // Print the first few nodes for verification
-        std::cout << "Rank " << processRank << " node IDs: ";
-        for(int i = 0; i < std::min(30, num_nodes); i++) {
-            std::cout << nodes_to_receive[i] << " ";
+        if(processRank == 1){
+            // Print node coordinates for verification
+            std::cout << "Rank " << processRank << " node coordinates:" << std::endl;
+            for(int i = 0; i < node.coords.dims(1); i++) {
+                std::cout << "Node " << i << ": " << node.coords.host(0, i, 0) << ", " 
+                        << node.coords.host(0, i, 1) << ", " 
+                        << node.coords.host(0, i, 2) << std::endl;    
+            }
         }
-        if(num_nodes > 30) std::cout << "...";
+
+
+
         std::cout << std::endl;
-
-
-        
-        // Step 8: Initialize local mesh with the elements from ParMETIS partitioning
-        
-        // Create a mapping from global to local node IDs for each rank
-        std::map<idx_t, int> global_to_local_node_map;
-        
-        // // Each rank builds its own mesh based on the received elements and nodes
-        // mesh.initialize_elems(my_elements_to_receive.size(), 3);
-        
-        // if(processRank == 0) {
-        //     // Build global to local node map
-        //     for(int i = 0; i < nodes_per_rank[0].size(); i++) {
-        //         global_to_local_node_map[nodes_per_rank[0][i]] = i;
-        //     }
-            
-        //     // Fill in the local mesh connectivity
-        //     for(int i = 0; i < my_elements_to_receive.size(); i++) {
-        //         int elem_gid = my_elements_to_receive[i];
-        //         for(int j = 0; j < initial_mesh.num_nodes_in_elem; j++) {
-        //             idx_t global_node_id = initial_mesh.nodes_in_elem.host(elem_gid, j);
-        //             int local_node_id = global_to_local_node_map[global_node_id];
-        //             mesh.nodes_in_elem.host(i, j) = local_node_id;
-        //         }
-        //     }
-        // }
-        // else {
-        //     // Other ranks need to receive element-to-node connectivity information
-            
-        //     // Build global to local node map based on the received node IDs
-        //     std::vector<idx_t> nodes_to_receive(node.coords.dims(1));
-        //     // Note: In a real implementation, we would need to receive the node IDs as well
-        //     for(int i = 0; i < nodes_to_receive.size(); i++) {
-        //         global_to_local_node_map[nodes_to_receive[i]] = i;
-        //     }
-            
-        //     // Receive element-to-node connectivity from rank 0
-        //     // This is a simplified version - in a real implementation we would need 
-        //     // more complex communication to get the actual element-to-node connectivity
-            
-        //     // For demonstration, just fill with placeholder values
-        //     for(int i = 0; i < my_elements_to_receive.size(); i++) {
-        //         for(int j = 0; j < mesh.num_nodes_in_elem; j++) {
-        //             mesh.nodes_in_elem.host(i, j) = j % nodes_to_receive.size();
-        //         }
-        //     }
-        // }
-
-        // MPI_Barrier(MPI_COMM_WORLD);
-
-
-        // std::cout << std::endl;
-        // std::cout << std::endl;
-        // std::cout << std::endl;
+        std::cout << std::endl;
+        std::cout << std::endl;
         
  
 
-        // // Print the global ids of the nods on this rank
-        // std::cout << "Rank " << processRank << " nodes_in_elem: ";
-        // for(int i = 0; i < mesh.nodes_in_elem.size(); i++) {
-        //     std::cout << mesh.nodes_in_elem.host(i, 0) << " ";
-        // }
-        // std::cout << std::endl;
-        
-        // // Update device side of mesh connectivity
-        // mesh.nodes_in_elem.update_device();
-        
-        // // Finalize mesh initialization
-        // int num_corners = my_elements_to_receive.size() * mesh.num_nodes_in_elem;
-        // mesh.initialize_corners(num_corners);
-        // mesh.build_connectivity();
-        
-        // std::cout << "Rank " << processRank << ": Local mesh initialized with " 
-        //           << mesh.num_elems << " elements and "
-        //           << node.coords.dims(1) << " nodes" << std::endl;
-        
-        
 
     } // end Kokkos initialize
     // Finalize Kokkos
